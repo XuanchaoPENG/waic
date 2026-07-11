@@ -48,11 +48,11 @@ configure_direct_network_env()
 import gradio as gr
 import numpy as np
 import trimesh
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 
 EMBODICHAIN_ROOT = Path(
-    os.environ.get("EMBODICHAIN_ROOT", "/home/oem/桌面/EmbodiChain")
+    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/桌面/EmbodiChain")
 ).expanduser()
 SCENE_ID = "current"
 
@@ -65,15 +65,16 @@ PROMPT2SCENE_ROOT = GYM_PROJECT_ROOT / SCENE_ID
 CONFIG_DIR = ACTION_AGENT_ROOT / "configs" / SCENE_ID
 FAST_GYM_CONFIG = CONFIG_DIR / "fast_gym_config.json"
 OUTPUTS_DIR = EMBODICHAIN_ROOT / "outputs"
+CURRENT_GYM_EXPORT_DIR = PROMPT2SCENE_ROOT / "gym_export"
+CURRENT_GYM_EXPORT_CONFIG = CURRENT_GYM_EXPORT_DIR / "gym_config.json"
 GRADIO_SCENE_DIR = CONFIG_DIR / "gradio_scene"
 GRADIO_SCENE_GLB = GRADIO_SCENE_DIR / "scene_current.glb"
-GRADIO_PREVIOUS_SCENE_GLB = GRADIO_SCENE_DIR / "previous_scene.glb"
+GRADIO_INITIAL_SCENE_GLB = GRADIO_SCENE_DIR / "initial_scene.glb"
 GRADIO_OBJECT_PREVIEW_GLB = GRADIO_SCENE_DIR / "object_preview.glb"
 SCENE_MANIFEST = GRADIO_SCENE_DIR / "scene_manifest.json"
 PENDING_PREFIX = "_gradio_pending_"
 REPLACED_PREFIX = "_gradio_replaced_"
 
-LOG_LINE_LIMIT = 80
 PROCESS_STOP_TIMEOUT_S = 8.0
 TEXT_REWRITE_SUFFIXES = {
     ".json",
@@ -84,10 +85,106 @@ TEXT_REWRITE_SUFFIXES = {
     ".md",
     ".csv",
 }
+VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+LEROBOT_PREVIEW_DIR = OUTPUTS_DIR / "lerobot_previews"
+LEROBOT_PREVIEW_MAX_FRAMES = 360
 TOP_MODE_AUTO = "auto"
 TOP_MODE_INTERACT = "interact"
-TOP_MODE_ROBOT_MODEL = "robot_model"
 TOP_MODE_PARALLEL_ENV = "parallel_env"
+PIPELINE_MODE_INITIAL = "initial"
+PIPELINE_MODE_EDIT = "edit"
+PIPELINE_MODE_TASK_ONLY = "task_only"
+ROBOT_PROFILE_FRANKA = "Franka"
+ROBOT_PROFILE_UR5 = "UR5"
+RUN_LOG_MODE_AUTO = "auto"
+RUN_LOG_MODE_INTERACT = "interact"
+VIDEO_SYNC_JS = r"""
+() => {
+    const audienceRootId = "embodichain-audience-video";
+    const lerobotRootId = "embodichain-lerobot-video";
+    let syncing = false;
+
+    function findVideo(rootId) {
+        const root = document.getElementById(rootId);
+        return root ? root.querySelector("video") : null;
+    }
+
+    function sourceLoaded(video) {
+        return Boolean(video && (video.currentSrc || video.src));
+    }
+
+    function copyTime(source, target) {
+        if (!sourceLoaded(source) || !sourceLoaded(target)) {
+            return;
+        }
+        const sourceTime = source.currentTime || 0;
+        if (!Number.isFinite(sourceTime)) {
+            return;
+        }
+        const duration = Number.isFinite(target.duration) ? target.duration : sourceTime;
+        const targetTime = Math.min(sourceTime, duration);
+        if (Math.abs((target.currentTime || 0) - targetTime) > 0.35) {
+            try {
+                target.currentTime = targetTime;
+            } catch (_) {
+                // Some browsers reject seeking before metadata is fully available.
+            }
+        }
+    }
+
+    function syncPlayback(sourceRootId, targetRootId, shouldPlay) {
+        if (syncing) {
+            return;
+        }
+        const source = findVideo(sourceRootId);
+        const target = findVideo(targetRootId);
+        if (!sourceLoaded(source) || !sourceLoaded(target)) {
+            return;
+        }
+
+        syncing = true;
+        copyTime(source, target);
+
+        const release = () => {
+            window.setTimeout(() => {
+                syncing = false;
+            }, 0);
+        };
+
+        if (shouldPlay) {
+            const result = target.play();
+            if (result && typeof result.finally === "function") {
+                result.catch(() => {}).finally(release);
+            } else {
+                release();
+            }
+        } else {
+            target.pause();
+            release();
+        }
+    }
+
+    function bindOne(rootId, peerRootId) {
+        const video = findVideo(rootId);
+        if (!sourceLoaded(video) || video.dataset.embodichainSyncBound === "true") {
+            return;
+        }
+        video.dataset.embodichainSyncBound = "true";
+        video.addEventListener("play", () => syncPlayback(rootId, peerRootId, true));
+        video.addEventListener("pause", () => syncPlayback(rootId, peerRootId, false));
+    }
+
+    function bindVideos() {
+        bindOne(audienceRootId, lerobotRootId);
+        bindOne(lerobotRootId, audienceRootId);
+    }
+
+    bindVideos();
+    window.setInterval(bindVideos, 1000);
+    const observer = new MutationObserver(bindVideos);
+    observer.observe(document.body, { childList: true, subtree: true });
+}
+"""
 
 
 @dataclass(frozen=True)
@@ -126,12 +223,17 @@ class RuntimeState:
     phase_key: str = "idle"
     status: str = "Idle."
     task_text: str = ""
+    input_task_text: str = ""
+    input_scene_text: str = ""
     image_path: Path | None = None
+    video_path: Path | None = None
+    lerobot_video_path: Path | None = None
+    lerobot_dataset_path: Path | None = None
     object_model_path: Path | None = None
     scene_model_path: Path | None = None
     edited_scene_model_path: Path | None = None
     last_error: str | None = None
-    log_lines: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_LINE_LIMIT))
+    log_lines: deque[str] = field(default_factory=deque)
 
 
 runtime = RuntimeState()
@@ -246,7 +348,12 @@ def reset_current_scene() -> list[str]:
         runtime.phase_key = "idle"
         runtime.status = "Idle."
         runtime.task_text = ""
+        runtime.input_task_text = ""
+        runtime.input_scene_text = ""
         runtime.image_path = None
+        runtime.video_path = None
+        runtime.lerobot_video_path = None
+        runtime.lerobot_dataset_path = None
         runtime.object_model_path = None
         runtime.scene_model_path = None
         runtime.edited_scene_model_path = None
@@ -266,12 +373,12 @@ def cleanup_current_and_staging() -> list[str]:
     paths: list[Path] = [
         PROMPT2SCENE_ROOT,
         CONFIG_DIR,
-        OUTPUTS_DIR,
         IMAGE_PATH,
         *pending_artifact_paths(),
     ]
     for path in paths:
         errors.extend(remove_path(path))
+    errors.extend(cleanup_outputs_preserving_videos())
     return errors
 
 
@@ -280,7 +387,6 @@ def cleanup_auto_generated_artifacts(extra_image_path: Path | None = None) -> li
     paths: list[Path] = [
         PROMPT2SCENE_ROOT,
         CONFIG_DIR,
-        OUTPUTS_DIR,
         IMAGE_PATH,
         *pending_artifact_paths(),
     ]
@@ -294,9 +400,15 @@ def cleanup_auto_generated_artifacts(extra_image_path: Path | None = None) -> li
 
     with runtime_lock:
         runtime.image_path = None
+        runtime.input_task_text = ""
+        runtime.input_scene_text = ""
+        runtime.video_path = None
+        runtime.lerobot_video_path = None
+        runtime.lerobot_dataset_path = None
         runtime.object_model_path = None
         runtime.scene_model_path = None
         runtime.edited_scene_model_path = None
+    errors.extend(cleanup_outputs_preserving_videos())
     return errors
 
 
@@ -333,6 +445,39 @@ def remove_path(path: Path) -> list[str]:
     return []
 
 
+def cleanup_outputs_preserving_videos() -> list[str]:
+    if not OUTPUTS_DIR.exists():
+        return []
+    if OUTPUTS_DIR.is_file():
+        if OUTPUTS_DIR.suffix.lower() in VIDEO_SUFFIXES:
+            return []
+        return remove_path(OUTPUTS_DIR)
+
+    errors: list[str] = []
+    for path in sorted(
+        OUTPUTS_DIR.rglob("*"),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        if path.is_file() and path.suffix.lower() not in VIDEO_SUFFIXES:
+            errors.extend(remove_path(path))
+
+    for path in sorted(
+        OUTPUTS_DIR.rglob("*"),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        if not path.is_dir():
+            continue
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+        except Exception as exc:
+            errors.append(f"Failed to remove empty output directory {path}: {exc}")
+    return errors
+
+
 def build_initial_pipeline_command(
     task_text: str,
     paths: ScenePaths,
@@ -367,9 +512,9 @@ def build_edit_pipeline_command(task_text: str, env_text: str) -> list[str]:
         sys.executable,
         "-m",
         "embodichain.gen_sim.action_agent_pipeline.cli.run_agent_pipeline",
-        "--use-existing-gym-project",
-        "--gym-project",
-        "gym_project/current/gym_export",
+        "--use-prompt2scene",
+        "--prompt2scene-output-root",
+        "gym_project/current",
         "--prompt2scene-prompt",
         env_text,
         "--config-output-dir",
@@ -384,33 +529,71 @@ def build_edit_pipeline_command(task_text: str, env_text: str) -> list[str]:
     ]
 
 
+def build_task_only_config_command(
+    task_text: str,
+    robot_profile: str | None = None,
+) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "embodichain.gen_sim.action_agent_pipeline.cli.generate_action_agent_config",
+        "--gym_project",
+        "gym_project/current/gym_export",
+        "--output_dir",
+        "gym_project/action_agent_pipeline/configs/current",
+        "--task_name",
+        SCENE_ID,
+        "--task_description",
+        task_text,
+        "--target_body_scale",
+        "1.3",
+        "--overwrite",
+    ]
+    profile = robot_profile_cli_value(robot_profile)
+    if profile:
+        command.extend(["--robot-profile", profile])
+    return command
+
+
+def robot_profile_cli_value(robot_profile: str | None) -> str | None:
+    if robot_profile == ROBOT_PROFILE_FRANKA:
+        return "franka"
+    if robot_profile == ROBOT_PROFILE_UR5:
+        return "dual_ur5"
+    return None
+
+
 def format_current_task(task_text: str, env_text: str = "") -> str:
     return "\n".join(
         part for part in ((task_text or "").strip(), (env_text or "").strip()) if part
     )
 
 
-def archive_auto_round_log(
+def archive_run_log(
     *,
-    auto_round: int,
-    task_label: str,
-    task_description: str,
-    scene_description: str,
+    mode: str,
+    task_description: str = "",
+    scene_description: str = "",
     outcome: str,
+    audience_video: Path | None = None,
 ) -> Path | None:
     with runtime_lock:
-        recent_logs = list(runtime.log_lines)
+        run_logs = list(runtime.log_lines)
         status_text = runtime.status
         last_error = runtime.last_error
+        runtime_video = runtime.video_path
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    safe_label = safe_filename_part(task_label) or "unknown"
-    log_path = AUTO_LOG_DIR / f"{timestamp}_round{auto_round:04d}_{safe_label}.md"
+    run_dir = make_next_log_archive_dir()
+    video_paths, video_errors = archive_audience_video(
+        run_dir,
+        audience_video or runtime_video,
+    )
+    log_path = run_dir / "log.md"
     content = [
-        f"# Auto Round {auto_round}",
+        f"mode: {mode}",
         "",
         f"Timestamp: {timestamp}",
-        f"Task label: {task_label or 'unknown'}",
         f"Outcome: {outcome}",
         "",
         "## Task description",
@@ -427,26 +610,470 @@ def archive_auto_round_log(
     ]
     if last_error:
         content.extend(["", "## Last error", "", last_error])
+    if video_paths:
+        content.extend(
+            [
+                "",
+                "## Archived audience video",
+                "",
+                *[path.as_posix() for path in video_paths],
+            ]
+        )
+    if video_errors:
+        content.extend(["", "## Video archive errors", "", *video_errors])
     content.extend(
         [
             "",
-            "## Recent logs",
+            "## Logs",
             "",
             "```text",
-            "\n".join(recent_logs) if recent_logs else "(no recent logs)",
+            "\n".join(run_logs) if run_logs else "(no logs)",
             "```",
             "",
         ]
     )
 
     try:
-        AUTO_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        run_dir.mkdir(parents=True, exist_ok=True)
         log_path.write_text("\n".join(content), encoding="utf-8")
     except Exception as exc:
         with runtime_lock:
-            runtime.log_lines.append(f"Failed to archive auto log: {exc}")
+            runtime.log_lines.append(f"Failed to archive run log: {exc}")
         return None
     return log_path
+
+
+def make_next_log_archive_dir() -> Path:
+    AUTO_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    existing_indices = [
+        int(path.name)
+        for path in AUTO_LOG_DIR.iterdir()
+        if path.is_dir() and path.name.isdigit()
+    ]
+    next_index = (max(existing_indices) + 1) if existing_indices else 1
+    while True:
+        candidate = AUTO_LOG_DIR / f"{next_index:04d}"
+        if not candidate.exists():
+            try:
+                candidate.mkdir(parents=True, exist_ok=False)
+                return candidate
+            except FileExistsError:
+                pass
+        next_index += 1
+
+
+def archive_audience_video(
+    run_dir: Path,
+    video_path: Path | None,
+) -> tuple[list[Path], list[str]]:
+    copied_paths: list[Path] = []
+    errors: list[str] = []
+    if video_path is None:
+        return copied_paths, errors
+    if not video_path.is_file():
+        return copied_paths, [f"Audience video not found: {video_path}"]
+    destination = run_dir / "audience_video" / video_path.name
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(video_path, destination)
+    except Exception as exc:
+        errors.append(f"Failed to archive audience video {video_path}: {exc}")
+        return copied_paths, errors
+    copied_paths.append(destination.relative_to(run_dir))
+    return copied_paths, errors
+
+
+def collect_output_videos() -> list[Path]:
+    if not OUTPUTS_DIR.is_dir():
+        return []
+    return sorted(
+        path
+        for path in OUTPUTS_DIR.rglob("*")
+        if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
+    )
+
+
+def collect_audience_output_videos() -> list[Path]:
+    videos = collect_output_videos()
+    audience_videos = [
+        path
+        for path in videos
+        if "audience" in path.relative_to(OUTPUTS_DIR).as_posix().lower()
+    ]
+    if audience_videos:
+        return audience_videos
+    return [
+        path
+        for path in videos
+        if "audience" in path.relative_to(OUTPUTS_DIR).as_posix().lower()
+    ]
+
+
+def latest_audience_output_video(min_mtime_ns: int | None = None) -> Path | None:
+    latest_path: Path | None = None
+    latest_mtime = -1
+    for path in collect_audience_output_videos():
+        try:
+            mtime = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        if min_mtime_ns is not None and mtime < min_mtime_ns:
+            continue
+        if mtime > latest_mtime:
+            latest_path = path
+            latest_mtime = mtime
+    return latest_path
+
+
+def configured_lerobot_roots() -> list[Path]:
+    roots: list[Path] = []
+    env_root = os.environ.get("EMBODICHAIN_DATASET_ROOT")
+    if env_root:
+        roots.append(Path(env_root).expanduser())
+    roots.append(Path("~/.cache/embodichain_datasets").expanduser())
+
+    config_roots = read_lerobot_save_paths(CURRENT_PATHS.fast_gym_config)
+    roots.extend(config_roots)
+
+    normalized: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        root = root.expanduser()
+        if not root.is_absolute():
+            root = EMBODICHAIN_ROOT / root
+        try:
+            resolved = root.resolve()
+        except OSError:
+            resolved = root
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        normalized.append(root)
+    return normalized
+
+
+def read_lerobot_save_paths(config_path: Path) -> list[Path]:
+    if not config_path.is_file():
+        return []
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    paths: list[Path] = []
+
+    def visit(value: Any, key_path: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            if (
+                key_path[-2:] == ("lerobot", "params")
+                and isinstance(value.get("save_path"), str)
+            ):
+                paths.append(Path(value["save_path"]))
+            for key, child in value.items():
+                visit(child, (*key_path, str(key)))
+        elif isinstance(value, list):
+            for item in value:
+                visit(item, key_path)
+
+    visit(config)
+    return paths
+
+
+def collect_lerobot_datasets() -> list[Path]:
+    datasets: list[Path] = []
+    for root in configured_lerobot_roots():
+        if not root.is_dir():
+            continue
+        try:
+            candidates = list(root.iterdir())
+        except OSError:
+            continue
+        for candidate in candidates:
+            if not candidate.is_dir():
+                continue
+            if (candidate / "meta" / "info.json").is_file() or (
+                candidate / "data"
+            ).is_dir():
+                datasets.append(candidate)
+    return datasets
+
+
+def latest_lerobot_dataset(min_mtime_ns: int | None = None) -> Path | None:
+    latest_path: Path | None = None
+    latest_mtime = -1
+    for dataset_path in collect_lerobot_datasets():
+        mtime = latest_lerobot_dataset_mtime_ns(dataset_path)
+        if min_mtime_ns is not None and mtime < min_mtime_ns:
+            continue
+        if mtime > latest_mtime:
+            latest_path = dataset_path
+            latest_mtime = mtime
+    return latest_path
+
+
+def latest_lerobot_dataset_mtime_ns(dataset_path: Path) -> int:
+    latest_mtime = -1
+    for child in dataset_path.rglob("*"):
+        if not child.is_file():
+            continue
+        try:
+            latest_mtime = max(latest_mtime, child.stat().st_mtime_ns)
+        except OSError:
+            continue
+    if latest_mtime >= 0:
+        return latest_mtime
+    try:
+        return dataset_path.stat().st_mtime_ns
+    except OSError:
+        return -1
+
+
+def build_lerobot_preview_video(dataset_path: Path) -> Path | None:
+    parquet_paths = sorted((dataset_path / "data").rglob("*.parquet"))
+    if not parquet_paths:
+        return None
+
+    latest_source_mtime = max(
+        latest_lerobot_dataset_mtime_ns(dataset_path),
+        *(path.stat().st_mtime_ns for path in parquet_paths),
+    )
+    output_path = LEROBOT_PREVIEW_DIR / f"{dataset_path.name}_data_preview.mp4"
+    if output_path.is_file() and output_path.stat().st_mtime_ns >= latest_source_mtime:
+        return output_path
+
+    try:
+        import imageio.v2 as imageio
+        import pandas as pd
+    except Exception as exc:
+        with runtime_lock:
+            runtime.log_lines.append(f"LeRobot preview skipped; missing dependency: {exc}")
+        return None
+
+    try:
+        data_frame = pd.concat(
+            [pd.read_parquet(path) for path in parquet_paths],
+            ignore_index=True,
+        )
+    except Exception as exc:
+        with runtime_lock:
+            runtime.log_lines.append(f"LeRobot preview skipped; read failed: {exc}")
+        return None
+
+    if data_frame.empty:
+        return None
+
+    try:
+        fps = read_lerobot_fps(dataset_path) or 25
+        fps = max(1, min(int(round(fps)), 30))
+        frames = render_lerobot_data_frames(data_frame, dataset_path.name)
+        if not frames:
+            return None
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with imageio.get_writer(output_path, fps=fps, codec="libx264") as writer:
+            for frame in frames:
+                writer.append_data(frame)
+    except Exception as exc:
+        with runtime_lock:
+            runtime.log_lines.append(f"LeRobot preview skipped; render failed: {exc}")
+        return None
+
+    return output_path
+
+
+def read_lerobot_fps(dataset_path: Path) -> int | None:
+    info_path = dataset_path / "meta" / "info.json"
+    if not info_path.is_file():
+        return None
+    try:
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    fps = info.get("fps")
+    if isinstance(fps, (int, float)):
+        return int(fps)
+    return None
+
+
+def render_lerobot_data_frames(data_frame: Any, dataset_name: str) -> list[np.ndarray]:
+    total_rows = len(data_frame)
+    frame_indices = np.linspace(
+        0,
+        total_rows - 1,
+        num=min(total_rows, LEROBOT_PREVIEW_MAX_FRAMES),
+        dtype=int,
+    )
+    state = series_to_matrix(data_frame.get("observation.state"))
+    action = series_to_matrix(data_frame.get("action"))
+    qvel = series_to_matrix(data_frame.get("observation.qvel"))
+    timestamps = numeric_column(data_frame, "timestamp", total_rows)
+
+    frames: list[np.ndarray] = []
+    for row_index in frame_indices:
+        image = Image.new("RGB", (960, 544), (247, 248, 250))
+        draw = ImageDraw.Draw(image)
+        draw_lerobot_header(
+            draw,
+            dataset_name=dataset_name,
+            row_index=int(row_index),
+            total_rows=total_rows,
+            timestamp=float(timestamps[row_index]) if len(timestamps) else None,
+        )
+        draw_signal_panel(draw, (40, 96, 920, 220), state, row_index, "observation.state")
+        draw_signal_panel(draw, (40, 244, 920, 368), action, row_index, "action")
+        draw_bar_panel(draw, (40, 392, 920, 506), qvel, row_index, "observation.qvel")
+        frames.append(np.asarray(image))
+    return frames
+
+
+def series_to_matrix(series: Any, max_dims: int = 12) -> np.ndarray:
+    if series is None:
+        return np.empty((0, 0), dtype=float)
+    rows: list[np.ndarray] = []
+    for value in series:
+        array = np.asarray(value, dtype=float).reshape(-1)
+        if array.size:
+            rows.append(array[:max_dims])
+    if not rows:
+        return np.empty((0, 0), dtype=float)
+    width = max(row.size for row in rows)
+    matrix = np.full((len(rows), width), np.nan, dtype=float)
+    for index, row in enumerate(rows):
+        matrix[index, : row.size] = row
+    return matrix
+
+
+def numeric_column(data_frame: Any, column: str, fallback_length: int) -> np.ndarray:
+    if column not in data_frame:
+        return np.arange(fallback_length, dtype=float)
+    try:
+        values = np.asarray(data_frame[column], dtype=float)
+    except Exception:
+        values = np.arange(fallback_length, dtype=float)
+    return values
+
+
+def draw_lerobot_header(
+    draw: ImageDraw.ImageDraw,
+    *,
+    dataset_name: str,
+    row_index: int,
+    total_rows: int,
+    timestamp: float | None,
+) -> None:
+    draw.text((40, 28), "LeRobot dataset preview", fill=(17, 24, 39))
+    short_name = dataset_name if len(dataset_name) <= 78 else f"{dataset_name[:75]}..."
+    draw.text((40, 54), short_name, fill=(75, 85, 99))
+    progress = 0 if total_rows <= 1 else row_index / (total_rows - 1)
+    draw.text((750, 28), f"frame {row_index + 1}/{total_rows}", fill=(17, 24, 39))
+    if timestamp is not None:
+        draw.text((750, 54), f"t = {timestamp:.2f}s", fill=(75, 85, 99))
+    draw.rectangle((40, 78, 920, 82), fill=(224, 231, 239))
+    draw.rectangle((40, 78, int(40 + 880 * progress), 82), fill=(37, 99, 235))
+
+
+def draw_signal_panel(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    matrix: np.ndarray,
+    row_index: int,
+    title: str,
+) -> None:
+    x0, y0, x1, y1 = box
+    draw.rounded_rectangle(box, radius=8, fill=(255, 255, 255), outline=(209, 213, 219))
+    draw.text((x0 + 14, y0 + 10), title, fill=(17, 24, 39))
+    if matrix.size == 0:
+        draw.text((x0 + 14, y0 + 48), "No numeric data", fill=(107, 114, 128))
+        return
+    plot_box = (x0 + 14, y0 + 36, x1 - 14, y1 - 16)
+    draw_timeseries(draw, plot_box, matrix, row_index)
+
+
+def draw_bar_panel(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    matrix: np.ndarray,
+    row_index: int,
+    title: str,
+) -> None:
+    x0, y0, x1, y1 = box
+    draw.rounded_rectangle(box, radius=8, fill=(255, 255, 255), outline=(209, 213, 219))
+    draw.text((x0 + 14, y0 + 10), title, fill=(17, 24, 39))
+    if matrix.size == 0 or row_index >= len(matrix):
+        draw.text((x0 + 14, y0 + 48), "No numeric data", fill=(107, 114, 128))
+        return
+    values = matrix[row_index]
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return
+    max_abs = max(float(np.nanmax(np.abs(finite))), 1e-6)
+    base_y = y1 - 30
+    left = x0 + 18
+    available_width = x1 - x0 - 36
+    bar_count = min(len(values), 12)
+    bar_gap = 8
+    bar_width = max(8, (available_width - bar_gap * (bar_count - 1)) // bar_count)
+    for index in range(bar_count):
+        value = values[index]
+        if not np.isfinite(value):
+            continue
+        x = left + index * (bar_width + bar_gap)
+        height = int((abs(float(value)) / max_abs) * 58)
+        color = (22, 163, 74) if value >= 0 else (220, 38, 38)
+        y_top = base_y - height
+        draw.rectangle((x, y_top, x + bar_width, base_y), fill=color)
+        draw.text((x, base_y + 5), str(index), fill=(107, 114, 128))
+
+
+def draw_timeseries(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    matrix: np.ndarray,
+    row_index: int,
+) -> None:
+    x0, y0, x1, y1 = box
+    draw.rectangle(box, outline=(229, 231, 235))
+    sample_count = min(len(matrix), LEROBOT_PREVIEW_MAX_FRAMES)
+    if sample_count <= 1:
+        return
+    sampled = matrix[
+        np.linspace(0, len(matrix) - 1, num=sample_count, dtype=int),
+        : min(matrix.shape[1], 8),
+    ]
+    finite = sampled[np.isfinite(sampled)]
+    if finite.size == 0:
+        return
+    minimum = float(np.nanmin(finite))
+    maximum = float(np.nanmax(finite))
+    if math.isclose(minimum, maximum):
+        minimum -= 1.0
+        maximum += 1.0
+    palette = [
+        (37, 99, 235),
+        (5, 150, 105),
+        (217, 119, 6),
+        (220, 38, 38),
+        (124, 58, 237),
+        (8, 145, 178),
+        (79, 70, 229),
+        (202, 138, 4),
+    ]
+
+    def point(sample_index: int, value: float) -> tuple[int, int]:
+        x = int(x0 + (x1 - x0) * sample_index / (sample_count - 1))
+        y = int(y1 - (y1 - y0) * (value - minimum) / (maximum - minimum))
+        return x, y
+
+    for dim in range(sampled.shape[1]):
+        points = [
+            point(index, float(value))
+            for index, value in enumerate(sampled[:, dim])
+            if np.isfinite(value)
+        ]
+        if len(points) >= 2:
+            draw.line(points, fill=palette[dim % len(palette)], width=2)
+
+    cursor_x = int(x0 + (x1 - x0) * row_index / max(len(matrix) - 1, 1))
+    draw.line((cursor_x, y0, cursor_x, y1), fill=(17, 24, 39), width=2)
 
 
 def safe_filename_part(value: str) -> str:
@@ -457,8 +1084,13 @@ def safe_filename_part(value: str) -> str:
     return safe.strip("_")[:80]
 
 
-def build_run_agent_command(paths: ScenePaths) -> list[str]:
-    return [
+def build_run_agent_command(
+    paths: ScenePaths,
+    *,
+    parallel_env: bool = False,
+    robot_profile: str | None = None,
+) -> list[str]:
+    command = [
         sys.executable,
         "-m",
         "embodichain.gen_sim.action_agent_pipeline.cli.run_agent",
@@ -470,6 +1102,19 @@ def build_run_agent_command(paths: ScenePaths) -> list[str]:
         str(paths.agent_config),
         "--regenerate",
     ]
+    if robot_profile == ROBOT_PROFILE_FRANKA:
+        command.extend(["--robot-profile", "franka"])
+    if parallel_env:
+        command.extend(
+            [
+                "--num_envs",
+                "2",
+                "--arena_space",
+                "3",
+                "--filter_dataset_saving",
+            ]
+        )
+    return command
 
 
 def start_pipeline(command: list[str]) -> subprocess.Popen[str]:
@@ -604,10 +1249,13 @@ def build_gradio_scene_from_fast_config(
     scene_manifest = scene_dir / "scene_manifest.json"
     with config_path.open("r", encoding="utf-8") as file:
         config = json.load(file)
+    config_stat = config_path.stat()
 
     scene = trimesh.Scene()
     manifest: dict[str, Any] = {
         "source_config": os.path.relpath(config_path, scene_dir),
+        "source_config_size": config_stat.st_size,
+        "source_config_mtime_ns": config_stat.st_mtime_ns,
         "objects": [],
     }
 
@@ -630,6 +1278,8 @@ def build_gradio_scene_from_fast_config(
                 "uid": obj.get("uid"),
                 "role": role,
                 "source_mesh": os.path.relpath(mesh_path, scene_dir),
+                "source_mesh_size": mesh_path.stat().st_size,
+                "source_mesh_mtime_ns": mesh_path.stat().st_mtime_ns,
             }
         )
         object_count += 1
@@ -646,24 +1296,75 @@ def build_gradio_scene_from_fast_config(
     return scene_glb
 
 
+def gradio_scene_is_current(
+    scene_glb: Path,
+    manifest_path: Path,
+    config_path: Path,
+) -> bool:
+    if not scene_glb.is_file() or not manifest_path.is_file() or not config_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config_stat = config_path.stat()
+    except Exception:
+        return False
+
+    if manifest.get("source_config") != os.path.relpath(config_path, manifest_path.parent):
+        return False
+    if manifest.get("source_config_size") != config_stat.st_size:
+        return False
+    if manifest.get("source_config_mtime_ns") != config_stat.st_mtime_ns:
+        return False
+
+    expected_objects = []
+    try:
+        for role, obj in iter_scene_objects(config):
+            shape = obj.get("shape") if isinstance(obj, dict) else None
+            if not isinstance(shape, dict) or shape.get("shape_type") != "Mesh":
+                continue
+            raw_fpath = shape.get("fpath")
+            if not raw_fpath:
+                continue
+            mesh_path = resolve_mesh_path(config_path.parent, str(raw_fpath))
+            mesh_stat = mesh_path.stat()
+            expected_objects.append(
+                {
+                    "uid": obj.get("uid"),
+                    "role": role,
+                    "source_mesh": os.path.relpath(mesh_path, manifest_path.parent),
+                    "source_mesh_size": mesh_stat.st_size,
+                    "source_mesh_mtime_ns": mesh_stat.st_mtime_ns,
+                }
+            )
+    except OSError:
+        return False
+    return manifest.get("objects") == expected_objects
+
+
 def collect_generated_object_glbs(paths: ScenePaths) -> list[Path]:
-    glb_dir = paths.prompt_root / "unified_scene_gen" / "glb_gen"
-    if not glb_dir.is_dir():
+    if not paths.prompt_root.is_dir():
         return []
 
-    simready = [
-        path
-        for path in glb_dir.rglob("*_simready.glb")
-        if is_previewable_glb(path)
-    ]
-    if simready:
-        return sorted(simready)
-
-    return sorted(
-        path
-        for path in glb_dir.rglob("*.glb")
-        if is_previewable_glb(path)
-    )
+    glb_paths: list[Path] = []
+    seen: set[Path] = set()
+    for glb_dir in sorted(paths.prompt_root.rglob("glb_gen")):
+        if not glb_dir.is_dir():
+            continue
+        candidates = [
+            path for path in glb_dir.rglob("*_simready.glb") if is_previewable_glb(path)
+        ]
+        if not candidates:
+            candidates = [
+                path for path in glb_dir.rglob("*.glb") if is_previewable_glb(path)
+            ]
+        for path in sorted(candidates):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            glb_paths.append(path)
+    return glb_paths
 
 
 def is_previewable_glb(path: Path) -> bool:
@@ -778,15 +1479,38 @@ def object_preview_is_current(
 
 def load_mesh_geometries(mesh_path: Path) -> list[trimesh.Trimesh]:
     loaded = trimesh.load(mesh_path, force="scene", process=False)
+    gltf_to_sim_transform = gltf_to_sim_frame_transform(mesh_path)
     if isinstance(loaded, trimesh.Trimesh):
-        return [loaded.copy()]
+        mesh = loaded.copy()
+        if gltf_to_sim_transform is not None:
+            mesh.apply_transform(gltf_to_sim_transform)
+        return [mesh]
     if isinstance(loaded, trimesh.Scene):
         meshes: list[trimesh.Trimesh] = []
         for geometry in loaded.dump(concatenate=False):
             if isinstance(geometry, trimesh.Trimesh):
-                meshes.append(geometry.copy())
+                mesh = geometry.copy()
+                if gltf_to_sim_transform is not None:
+                    mesh.apply_transform(gltf_to_sim_transform)
+                meshes.append(mesh)
         return meshes
     raise TypeError(f"Unsupported mesh type for {mesh_path}: {type(loaded)!r}")
+
+
+def gltf_to_sim_frame_transform(mesh_path: Path) -> np.ndarray | None:
+    if mesh_path.suffix.lower() not in {".glb", ".gltf"}:
+        return None
+    # Match DexSim's native GLTF Y-up to simulation Z-up conversion.
+    transform = np.eye(4)
+    transform[:3, :3] = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=float,
+    )
+    return transform
 
 
 def combined_bounds(meshes: list[trimesh.Trimesh]) -> np.ndarray:
@@ -821,22 +1545,74 @@ def resolve_mesh_path(config_dir: Path, raw_fpath: str) -> Path:
 
 
 def object_transform(obj: dict[str, Any]) -> np.ndarray:
-    position = vector3(obj.get("init_pos"), [0.0, 0.0, 0.0])
-    rotation_degrees = vector3(obj.get("init_rot"), [0.0, 0.0, 0.0])
     scale = vector3(obj.get("body_scale"), [1.0, 1.0, 1.0])
 
     scale_matrix = np.eye(4)
     scale_matrix[0, 0] = scale[0]
     scale_matrix[1, 1] = scale[1]
     scale_matrix[2, 2] = scale[2]
-    rotation_matrix = trimesh.transformations.euler_matrix(
-        math.radians(rotation_degrees[0]),
-        math.radians(rotation_degrees[1]),
-        math.radians(rotation_degrees[2]),
-        axes="sxyz",
+
+    init_local_pose = matrix4(obj.get("init_local_pose"))
+    if init_local_pose is not None:
+        return init_local_pose @ scale_matrix
+
+    position = vector3(obj.get("init_pos"), [0.0, 0.0, 0.0])
+    rotation_degrees = vector3(obj.get("init_rot"), [0.0, 0.0, 0.0])
+    root_matrix = euler_xyz_degrees_matrix(rotation_degrees, position)
+    return root_matrix @ scale_matrix
+
+
+def euler_xyz_degrees_matrix(
+    rotation_degrees: list[float],
+    position: list[float],
+) -> np.ndarray:
+    rx, ry, rz = (math.radians(value) for value in rotation_degrees)
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+
+    rot_x = np.array(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, cx, -sx, 0.0],
+            [0.0, sx, cx, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=float,
     )
-    translation_matrix = trimesh.transformations.translation_matrix(position)
-    return translation_matrix @ rotation_matrix @ scale_matrix
+    rot_y = np.array(
+        [
+            [cy, 0.0, sy, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [-sy, 0.0, cy, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    rot_z = np.array(
+        [
+            [cz, -sz, 0.0, 0.0],
+            [sz, cz, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    matrix = rot_x @ rot_y @ rot_z
+    matrix[:3, 3] = position
+    return matrix
+
+
+def matrix4(value: Any) -> np.ndarray | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        matrix = np.asarray(value, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+        return None
+    return matrix
 
 
 def vector3(value: Any, default: list[float]) -> list[float]:
@@ -965,6 +1741,15 @@ def rewrite_promoted_paths(stage: ScenePaths) -> None:
                 path.write_text(new_text, encoding="utf-8")
 
 
+def ensure_initial_scene_snapshot(*, overwrite: bool = False) -> Path:
+    if not GRADIO_SCENE_GLB.is_file():
+        build_gradio_scene_from_fast_config(FAST_GYM_CONFIG, GRADIO_SCENE_DIR)
+    if overwrite or not GRADIO_INITIAL_SCENE_GLB.is_file():
+        GRADIO_SCENE_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(GRADIO_SCENE_GLB, GRADIO_INITIAL_SCENE_GLB)
+    return GRADIO_INITIAL_SCENE_GLB
+
+
 def prepare_current_scene_for_edit() -> Path:
     scene_state = PROMPT2SCENE_ROOT / "gym_export" / "scene_state" / "result.json"
     if not scene_state.is_file():
@@ -974,16 +1759,16 @@ def prepare_current_scene_for_edit() -> Path:
     if not FAST_GYM_CONFIG.is_file():
         raise FileNotFoundError(f"Current gym config not found: {FAST_GYM_CONFIG}")
 
-    if not GRADIO_SCENE_GLB.is_file():
-        build_gradio_scene_from_fast_config(FAST_GYM_CONFIG, GRADIO_SCENE_DIR)
-
-    GRADIO_SCENE_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(GRADIO_SCENE_GLB, GRADIO_PREVIOUS_SCENE_GLB)
+    initial_scene_path = ensure_initial_scene_snapshot()
     errors = remove_path(GRADIO_SCENE_GLB)
     errors.extend(remove_path(SCENE_MANIFEST))
     if errors:
         raise RuntimeError("\n".join(errors))
-    return GRADIO_PREVIOUS_SCENE_GLB
+    return initial_scene_path
+
+
+def current_scene_available_for_task_only() -> bool:
+    return CURRENT_GYM_EXPORT_CONFIG.is_file()
 
 
 def run_generate(
@@ -992,10 +1777,18 @@ def run_generate(
     env_text: str,
     *,
     force_initial: bool = False,
+    parallel_env: bool = False,
+    robot_profile: str | None = None,
+    run_log_mode: str = RUN_LOG_MODE_INTERACT,
 ):
     task_text = (task_text or "").strip()
     env_text = (env_text or "").strip()
-    mode = "edit" if env_text and not force_initial else "initial"
+    if env_text and not force_initial:
+        mode = PIPELINE_MODE_EDIT
+    elif not force_initial and current_scene_available_for_task_only():
+        mode = PIPELINE_MODE_TASK_ONLY
+    else:
+        mode = PIPELINE_MODE_INITIAL
     old_sim_process: subprocess.Popen[str] | None = None
     with runtime_lock:
         if runtime.is_busy:
@@ -1011,13 +1804,35 @@ def run_generate(
         terminate_process_group(old_sim_process)
 
     token = uuid.uuid4().hex
-    stage = CURRENT_PATHS if mode == "edit" else make_stage_paths(token)
-    previous_scene_path: Path | None = None
+    stage = (
+        CURRENT_PATHS
+        if mode in {PIPELINE_MODE_EDIT, PIPELINE_MODE_TASK_ONLY}
+        else make_stage_paths(token)
+    )
+    initial_scene_path: Path | None = None
+    existing_object_preview_path = (
+        GRADIO_OBJECT_PREVIEW_GLB
+        if mode in {PIPELINE_MODE_EDIT, PIPELINE_MODE_TASK_ONLY}
+        and GRADIO_OBJECT_PREVIEW_GLB.is_file()
+        else None
+    )
     try:
-        if mode == "edit":
+        if mode == PIPELINE_MODE_EDIT:
             if not task_text:
                 raise ValueError("Please enter a task description.")
-            previous_scene_path = prepare_current_scene_for_edit()
+            initial_scene_path = prepare_current_scene_for_edit()
+            image_path = IMAGE_PATH if IMAGE_PATH.is_file() else None
+        elif mode == PIPELINE_MODE_TASK_ONLY:
+            if not task_text:
+                raise ValueError("Please enter a task description.")
+            if not CURRENT_GYM_EXPORT_CONFIG.is_file():
+                raise FileNotFoundError(
+                    f"Current gym export not found: {CURRENT_GYM_EXPORT_CONFIG}"
+                )
+            if GRADIO_INITIAL_SCENE_GLB.is_file():
+                initial_scene_path = GRADIO_INITIAL_SCENE_GLB
+            elif GRADIO_SCENE_GLB.is_file():
+                initial_scene_path = GRADIO_SCENE_GLB
             image_path = IMAGE_PATH if IMAGE_PATH.is_file() else None
         else:
             image_path = save_input(image_value, task_text, stage.image_path)
@@ -1026,28 +1841,44 @@ def run_generate(
             runtime.phase_key = "failed"
             runtime.status = f"Input error: {exc}"
             runtime.last_error = str(exc)
+            runtime.log_lines.clear()
+            runtime.log_lines.append(runtime.status)
+        if run_log_mode == RUN_LOG_MODE_INTERACT:
+            archive_run_log(
+                mode=RUN_LOG_MODE_INTERACT,
+                task_description=task_text,
+                scene_description=env_text,
+                outcome="input_error",
+            )
         yield ui_snapshot()
         return
 
-    command = (
-        build_edit_pipeline_command(task_text, env_text)
-        if mode == "edit"
-        else build_initial_pipeline_command(task_text, stage, env_text)
-    )
+    if mode == PIPELINE_MODE_EDIT:
+        command = build_edit_pipeline_command(task_text, env_text)
+    elif mode == PIPELINE_MODE_TASK_ONLY:
+        command = build_task_only_config_command(task_text, robot_profile)
+    else:
+        command = build_initial_pipeline_command(task_text, stage, env_text)
     display_task_text = format_current_task(task_text, env_text)
     with runtime_lock:
         runtime.run_token = token
         runtime.is_busy = True
         runtime.phase_key = "received"
-        runtime.status = (
-            "Starting scene edit..."
-            if mode == "edit"
-            else "Input saved. Starting local pipeline..."
-        )
+        if mode == PIPELINE_MODE_EDIT:
+            runtime.status = "Starting scene edit..."
+        elif mode == PIPELINE_MODE_TASK_ONLY:
+            runtime.status = "Current scene found. Regenerating action config only..."
+        else:
+            runtime.status = "Input saved. Starting local pipeline..."
         runtime.task_text = display_task_text
+        runtime.input_task_text = task_text
+        runtime.input_scene_text = env_text
         runtime.image_path = image_path
-        runtime.object_model_path = None
-        runtime.scene_model_path = previous_scene_path
+        runtime.video_path = None
+        runtime.lerobot_video_path = None
+        runtime.lerobot_dataset_path = None
+        runtime.object_model_path = existing_object_preview_path
+        runtime.scene_model_path = initial_scene_path
         runtime.edited_scene_model_path = None
         runtime.last_error = None
         runtime.sim_started = False
@@ -1066,6 +1897,13 @@ def run_generate(
             runtime.phase_key = "failed"
             runtime.status = f"Pipeline start failed: {exc}"
             runtime.last_error = str(exc)
+        if run_log_mode == RUN_LOG_MODE_INTERACT:
+            archive_run_log(
+                mode=RUN_LOG_MODE_INTERACT,
+                task_description=task_text,
+                scene_description=env_text,
+                outcome="pipeline_start_failed",
+            )
         yield ui_snapshot()
         return
 
@@ -1077,7 +1915,20 @@ def run_generate(
     )
     supervisor = threading.Thread(
         target=supervise_pipeline,
-        args=(token, stage, mode, process, display_task_text, output_queue, reader),
+        args=(
+            token,
+            stage,
+            mode,
+            process,
+            display_task_text,
+            task_text,
+            env_text,
+            output_queue,
+            reader,
+            parallel_env,
+            robot_profile,
+            run_log_mode,
+        ),
         daemon=True,
     )
 
@@ -1124,6 +1975,9 @@ def start_auto_loop_state() -> str | None:
         runtime.auto_round = 0
         runtime.phase_key = "received"
         runtime.status = "Auto loop starting."
+        runtime.video_path = None
+        runtime.lerobot_video_path = None
+        runtime.lerobot_dataset_path = None
         runtime.last_error = None
         runtime.log_lines.clear()
 
@@ -1174,7 +2028,12 @@ def stop_auto_loop_if_running() -> bool:
         runtime.phase_key = "idle"
         runtime.status = "Stopped."
         runtime.task_text = ""
+        runtime.input_task_text = ""
+        runtime.input_scene_text = ""
         runtime.image_path = None
+        runtime.video_path = None
+        runtime.lerobot_video_path = None
+        runtime.lerobot_dataset_path = None
         runtime.object_model_path = None
         runtime.scene_model_path = None
         runtime.edited_scene_model_path = None
@@ -1209,18 +2068,23 @@ def wait_for_current_simulation_to_exit(
 
 
 def run_generate_for_top_mode(
-    top_mode: str,
+    run_mode: str,
+    action_mode: str | None,
+    robot_profile: str | None,
     image_value: str | np.ndarray | Image.Image,
     task_text: str,
     env_text: str,
 ):
-    if top_mode != TOP_MODE_AUTO:
-        force_initial = top_mode == TOP_MODE_INTERACT
+    parallel_env = action_mode == TOP_MODE_PARALLEL_ENV
+    if run_mode != TOP_MODE_AUTO:
         for snapshot in run_generate(
             image_value,
             task_text,
             env_text,
-            force_initial=force_initial,
+            force_initial=False,
+            parallel_env=parallel_env,
+            robot_profile=robot_profile,
+            run_log_mode=RUN_LOG_MODE_INTERACT,
         ):
             yield (gr.update(), gr.update(), gr.update(), *snapshot)
         return
@@ -1264,9 +2128,8 @@ def run_generate_for_top_mode(
                 runtime.last_error = str(exc)
                 runtime.log_lines.append(runtime.status)
             yield (gr.update(), gr.update(), gr.update(), *ui_snapshot())
-            archive_auto_round_log(
-                auto_round=auto_round,
-                task_label=task_label,
+            archive_run_log(
+                mode=RUN_LOG_MODE_AUTO,
                 task_description=auto_task,
                 scene_description=auto_scene,
                 outcome="text_generation_failed",
@@ -1279,7 +2142,12 @@ def run_generate_for_top_mode(
         task_label = f"task{auto_input.task_index[0]}_{auto_input.task_index[1]}"
         with runtime_lock:
             runtime.task_text = format_current_task(auto_task, auto_scene)
+            runtime.input_task_text = auto_task
+            runtime.input_scene_text = auto_scene
             runtime.image_path = auto_input.base_image_path
+            runtime.video_path = None
+            runtime.lerobot_video_path = None
+            runtime.lerobot_dataset_path = None
             runtime.phase_key = "received"
             runtime.status = (
                 f"Auto round {auto_round}: selected {task_label}. "
@@ -1299,9 +2167,8 @@ def run_generate_for_top_mode(
         )
 
         if not auto_loop_is_active(loop_token):
-            archive_auto_round_log(
-                auto_round=auto_round,
-                task_label=task_label,
+            archive_run_log(
+                mode=RUN_LOG_MODE_AUTO,
                 task_description=auto_task,
                 scene_description=auto_scene,
                 outcome="stopped",
@@ -1313,15 +2180,17 @@ def run_generate_for_top_mode(
             auto_task,
             auto_scene,
             force_initial=True,
+            parallel_env=parallel_env,
+            robot_profile=robot_profile,
+            run_log_mode=RUN_LOG_MODE_AUTO,
         ):
             yield (base_image, auto_task, auto_scene, *snapshot)
             if not auto_loop_is_active(loop_token):
                 break
 
         if not auto_loop_is_active(loop_token):
-            archive_auto_round_log(
-                auto_round=auto_round,
-                task_label=task_label,
+            archive_run_log(
+                mode=RUN_LOG_MODE_AUTO,
                 task_description=auto_task,
                 scene_description=auto_scene,
                 outcome="stopped",
@@ -1339,9 +2208,8 @@ def run_generate_for_top_mode(
                     runtime.log_lines.append(
                         f"Auto continuing after failure: {pipeline_error}"
                     )
-            archive_auto_round_log(
-                auto_round=auto_round,
-                task_label=task_label,
+            archive_run_log(
+                mode=RUN_LOG_MODE_AUTO,
                 task_description=auto_task,
                 scene_description=auto_scene,
                 outcome="pipeline_failed",
@@ -1357,19 +2225,14 @@ def run_generate_for_top_mode(
             yield snapshot
 
         if not auto_loop_is_active(loop_token):
-            archive_auto_round_log(
-                auto_round=auto_round,
-                task_label=task_label,
+            archive_run_log(
+                mode=RUN_LOG_MODE_AUTO,
                 task_description=auto_task,
                 scene_description=auto_scene,
                 outcome="stopped",
             )
             break
 
-        cleanup_errors = cleanup_auto_generated_artifacts()
-        if cleanup_errors:
-            with runtime_lock:
-                runtime.log_lines.extend(cleanup_errors)
         with runtime_lock:
             simulation_completed = (
                 runtime.sim_started
@@ -1377,13 +2240,16 @@ def run_generate_for_top_mode(
                 and runtime.sim_process is None
             )
             round_outcome = "completed" if simulation_completed else "simulation_failed"
-        archive_auto_round_log(
-            auto_round=auto_round,
-            task_label=task_label,
+        archive_run_log(
+            mode=RUN_LOG_MODE_AUTO,
             task_description=auto_task,
             scene_description=auto_scene,
             outcome=round_outcome,
         )
+        cleanup_errors = cleanup_auto_generated_artifacts()
+        if cleanup_errors:
+            with runtime_lock:
+                runtime.log_lines.extend(cleanup_errors)
 
     finish_auto_loop(loop_token)
 
@@ -1394,10 +2260,16 @@ def supervise_pipeline(
     mode: str,
     process: subprocess.Popen[str],
     display_task_text: str,
+    task_description: str,
+    scene_description: str,
     output_queue: queue.Queue[str],
     reader: threading.Thread,
+    parallel_env: bool,
+    robot_profile: str | None,
+    run_log_mode: str,
 ) -> None:
-    is_edit = mode == "edit"
+    is_edit = mode == PIPELINE_MODE_EDIT
+    is_task_only = mode == PIPELINE_MODE_TASK_ONLY
     scene_build_error: str | None = None
     simulation_error: str | None = None
     simulation_started = False
@@ -1455,8 +2327,13 @@ def supervise_pipeline(
 
             if (
                 not is_edit
+                and not is_task_only
                 and stage.fast_gym_config.is_file()
-                and not stage.gradio_scene_glb.is_file()
+                and not gradio_scene_is_current(
+                    stage.gradio_scene_glb,
+                    stage.scene_manifest,
+                    stage.fast_gym_config,
+                )
             ):
                 try:
                     scene_path = build_gradio_scene_from_fast_config(
@@ -1506,9 +2383,35 @@ def supervise_pipeline(
                     runtime.log_lines.append(f"Object preview skipped: {exc}")
 
         if (
+            is_task_only
+            and process.returncode == 0
+            and stage.fast_gym_config.is_file()
+        ):
+            try:
+                scene_path = build_gradio_scene_from_fast_config(
+                    stage.fast_gym_config,
+                    stage.gradio_scene_dir,
+                )
+                scene_build_error = None
+                if GRADIO_SCENE_GLB.is_file():
+                    GRADIO_SCENE_DIR.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(GRADIO_SCENE_GLB, GRADIO_INITIAL_SCENE_GLB)
+                with runtime_lock:
+                    runtime.scene_model_path = scene_path
+                    runtime.edited_scene_model_path = None
+                    runtime.phase_key = "preview"
+                    runtime.status = "3D preview loaded."
+                    runtime.last_error = None
+            except Exception as exc:
+                scene_build_error = str(exc)
+        elif (
             stage.fast_gym_config.is_file()
             and (not is_edit or process.returncode == 0)
-            and not stage.gradio_scene_glb.is_file()
+            and not gradio_scene_is_current(
+                stage.gradio_scene_glb,
+                stage.scene_manifest,
+                stage.fast_gym_config,
+            )
         ):
             try:
                 scene_path = build_gradio_scene_from_fast_config(
@@ -1529,7 +2432,16 @@ def supervise_pipeline(
 
         cleanup_errors: list[str] = []
         promotion_error: str | None = None
-        pipeline_output_ready = stage.fast_gym_config.is_file()
+        pipeline_output_ready = (
+            stage.fast_gym_config.is_file() and stage.agent_config.is_file()
+            if is_task_only
+            else stage.fast_gym_config.is_file()
+        )
+        missing_output_name = (
+            f"{stage.fast_gym_config.name} and/or {stage.agent_config.name}"
+            if is_task_only
+            else FAST_GYM_CONFIG.name
+        )
         pipeline_succeeded = (
             process.returncode == 0
             and pipeline_output_ready
@@ -1542,11 +2454,38 @@ def supervise_pipeline(
                         runtime.image_path = IMAGE_PATH if IMAGE_PATH.is_file() else None
                         if GRADIO_OBJECT_PREVIEW_GLB.is_file():
                             runtime.object_model_path = GRADIO_OBJECT_PREVIEW_GLB
-                        if GRADIO_PREVIOUS_SCENE_GLB.is_file():
-                            runtime.scene_model_path = GRADIO_PREVIOUS_SCENE_GLB
+                        if GRADIO_INITIAL_SCENE_GLB.is_file():
+                            runtime.scene_model_path = GRADIO_INITIAL_SCENE_GLB
                         if GRADIO_SCENE_GLB.is_file():
                             runtime.edited_scene_model_path = GRADIO_SCENE_GLB
-                simulation_error = launch_current_simulation(token)
+                simulation_error = launch_current_simulation(
+                    token,
+                    parallel_env=parallel_env,
+                    robot_profile=robot_profile,
+                    run_log_mode=run_log_mode,
+                    task_description=task_description,
+                    scene_description=scene_description,
+                )
+                simulation_started = simulation_error is None
+            elif is_task_only:
+                with runtime_lock:
+                    if runtime.run_token == token:
+                        runtime.image_path = IMAGE_PATH if IMAGE_PATH.is_file() else None
+                        if GRADIO_OBJECT_PREVIEW_GLB.is_file():
+                            runtime.object_model_path = GRADIO_OBJECT_PREVIEW_GLB
+                        if GRADIO_INITIAL_SCENE_GLB.is_file():
+                            runtime.scene_model_path = GRADIO_INITIAL_SCENE_GLB
+                        elif GRADIO_SCENE_GLB.is_file():
+                            runtime.scene_model_path = GRADIO_SCENE_GLB
+                        runtime.edited_scene_model_path = None
+                simulation_error = launch_current_simulation(
+                    token,
+                    parallel_env=parallel_env,
+                    robot_profile=robot_profile,
+                    run_log_mode=run_log_mode,
+                    task_description=task_description,
+                    scene_description=scene_description,
+                )
                 simulation_started = simulation_error is None
             else:
                 try:
@@ -1554,17 +2493,37 @@ def supervise_pipeline(
                 except Exception as exc:
                     promotion_error = str(exc)
                 else:
+                    initial_scene_error: str | None = None
+                    try:
+                        ensure_initial_scene_snapshot(overwrite=True)
+                    except Exception as exc:
+                        initial_scene_error = str(exc)
                     with runtime_lock:
                         if runtime.run_token == token:
                             runtime.image_path = IMAGE_PATH
                             if GRADIO_OBJECT_PREVIEW_GLB.is_file():
                                 runtime.object_model_path = GRADIO_OBJECT_PREVIEW_GLB
-                            if GRADIO_SCENE_GLB.is_file():
+                            if GRADIO_INITIAL_SCENE_GLB.is_file():
+                                runtime.scene_model_path = GRADIO_INITIAL_SCENE_GLB
+                            elif GRADIO_SCENE_GLB.is_file():
                                 runtime.scene_model_path = GRADIO_SCENE_GLB
                             runtime.edited_scene_model_path = None
-                    simulation_error = launch_current_simulation(token)
+                            if initial_scene_error:
+                                runtime.log_lines.append(
+                                    f"Initial scene snapshot skipped: {initial_scene_error}"
+                                )
+                    simulation_error = launch_current_simulation(
+                        token,
+                        parallel_env=parallel_env,
+                        robot_profile=robot_profile,
+                        run_log_mode=run_log_mode,
+                        task_description=task_description,
+                        scene_description=scene_description,
+                    )
                     simulation_started = simulation_error is None
 
+        archive_after_status = False
+        archive_outcome = "completed"
         with runtime_lock:
             if runtime.run_token != token:
                 return
@@ -1578,10 +2537,13 @@ def supervise_pipeline(
                 if GRADIO_OBJECT_PREVIEW_GLB.is_file():
                     runtime.object_model_path = GRADIO_OBJECT_PREVIEW_GLB
                 if is_edit:
-                    if GRADIO_PREVIOUS_SCENE_GLB.is_file():
-                        runtime.scene_model_path = GRADIO_PREVIOUS_SCENE_GLB
+                    if GRADIO_INITIAL_SCENE_GLB.is_file():
+                        runtime.scene_model_path = GRADIO_INITIAL_SCENE_GLB
                     if GRADIO_SCENE_GLB.is_file():
                         runtime.edited_scene_model_path = GRADIO_SCENE_GLB
+                elif GRADIO_INITIAL_SCENE_GLB.is_file():
+                    runtime.scene_model_path = GRADIO_INITIAL_SCENE_GLB
+                    runtime.edited_scene_model_path = None
                 elif GRADIO_SCENE_GLB.is_file():
                     runtime.scene_model_path = GRADIO_SCENE_GLB
                     runtime.edited_scene_model_path = None
@@ -1595,21 +2557,41 @@ def supervise_pipeline(
                     runtime.last_error = simulation_error
             elif process.returncode == 0 and not pipeline_output_ready:
                 runtime.phase_key = "failed"
-                runtime.status = f"Pipeline ended without {FAST_GYM_CONFIG.name}."
+                runtime.status = f"Pipeline ended without {missing_output_name}."
                 runtime.last_error = runtime.status
+                archive_outcome = "pipeline_output_missing"
             elif scene_build_error:
                 runtime.phase_key = "failed"
                 runtime.status = f"3D preview failed: {scene_build_error}"
                 runtime.last_error = scene_build_error
+                archive_outcome = "preview_failed"
             elif promotion_error:
                 runtime.phase_key = "failed"
                 runtime.status = f"Scene promotion failed: {promotion_error}"
                 runtime.last_error = promotion_error
+                archive_outcome = "promotion_failed"
             else:
                 runtime.phase_key = "failed"
                 runtime.status = f"Pipeline failed with return code {process.returncode}."
                 runtime.last_error = runtime.status
+                archive_outcome = "pipeline_failed"
+            if pipeline_succeeded and not promotion_error:
+                archive_outcome = (
+                    "dexsim_launch_failed" if simulation_error else "completed"
+                )
+            archive_after_status = (
+                run_log_mode == RUN_LOG_MODE_INTERACT
+                and not simulation_started
+            )
+        if archive_after_status:
+            archive_run_log(
+                mode=RUN_LOG_MODE_INTERACT,
+                task_description=task_description or display_task_text,
+                scene_description=scene_description,
+                outcome=archive_outcome,
+            )
     except Exception as exc:
+        should_archive_exception = False
         with runtime_lock:
             if runtime.run_token == token:
                 runtime.is_busy = False
@@ -1617,15 +2599,37 @@ def supervise_pipeline(
                 runtime.phase_key = "failed"
                 runtime.status = f"Pipeline supervision failed: {exc}"
                 runtime.last_error = str(exc)
+                runtime.log_lines.append(runtime.status)
+                should_archive_exception = run_log_mode == RUN_LOG_MODE_INTERACT
+        if should_archive_exception:
+            archive_run_log(
+                mode=RUN_LOG_MODE_INTERACT,
+                task_description=task_description or display_task_text,
+                scene_description=scene_description,
+                outcome="pipeline_supervision_failed",
+            )
 
 
-def launch_current_simulation(token: str) -> str | None:
+def launch_current_simulation(
+    token: str,
+    *,
+    parallel_env: bool = False,
+    robot_profile: str | None = None,
+    run_log_mode: str = RUN_LOG_MODE_INTERACT,
+    task_description: str = "",
+    scene_description: str = "",
+) -> str | None:
     if not CURRENT_PATHS.fast_gym_config.is_file():
         return f"Dexsim launch skipped; missing {CURRENT_PATHS.fast_gym_config}"
     if not CURRENT_PATHS.agent_config.is_file():
         return f"Dexsim launch skipped; missing {CURRENT_PATHS.agent_config}"
 
-    command = build_run_agent_command(CURRENT_PATHS)
+    command = build_run_agent_command(
+        CURRENT_PATHS,
+        parallel_env=parallel_env,
+        robot_profile=robot_profile,
+    )
+    started_at_ns = time.time_ns()
     try:
         process = start_pipeline(command)
     except Exception as exc:
@@ -1639,7 +2643,16 @@ def launch_current_simulation(token: str) -> str | None:
     )
     monitor = threading.Thread(
         target=monitor_simulation,
-        args=(token, process, output_queue, reader),
+        args=(
+            token,
+            process,
+            output_queue,
+            reader,
+            started_at_ns,
+            run_log_mode,
+            task_description,
+            scene_description,
+        ),
         daemon=True,
     )
 
@@ -1668,6 +2681,10 @@ def monitor_simulation(
     process: subprocess.Popen[str],
     output_queue: queue.Queue[str],
     reader: threading.Thread,
+    started_at_ns: int,
+    run_log_mode: str,
+    task_description: str,
+    scene_description: str,
 ) -> None:
     while process.poll() is None:
         append_simulation_logs(token, process, drain_output_queue(output_queue))
@@ -1675,15 +2692,35 @@ def monitor_simulation(
 
     reader.join(timeout=1.0)
     append_simulation_logs(token, process, drain_output_queue(output_queue))
+    latest_video = latest_audience_output_video(min_mtime_ns=started_at_ns)
+    latest_dataset = latest_lerobot_dataset(min_mtime_ns=started_at_ns)
+    lerobot_video = (
+        build_lerobot_preview_video(latest_dataset)
+        if latest_dataset is not None
+        else None
+    )
 
+    should_archive = False
+    archive_outcome = "completed"
     with runtime_lock:
         if runtime.run_token != token or runtime.sim_process is not process:
             return
         runtime.sim_process = None
         runtime.sim_finished = True
         runtime.sim_returncode = process.returncode
+        runtime.video_path = latest_video
+        runtime.lerobot_dataset_path = latest_dataset
+        runtime.lerobot_video_path = lerobot_video
         if process.returncode == 0:
             runtime.status = "Pipeline completed successfully.\nDexsim simulation finished."
+            if latest_video is None:
+                runtime.log_lines.append("Audience video not found in outputs.")
+            if latest_dataset is None:
+                runtime.log_lines.append("LeRobot dataset not found.")
+            elif lerobot_video is None:
+                runtime.log_lines.append(
+                    f"LeRobot dataset found, but preview was not generated: {latest_dataset}"
+                )
         else:
             runtime.status = (
                 "Pipeline completed successfully.\n"
@@ -1692,6 +2729,16 @@ def monitor_simulation(
             runtime.log_lines.append(
                 f"Dexsim simulation exited with return code {process.returncode}."
             )
+            archive_outcome = "simulation_failed"
+        should_archive = run_log_mode == RUN_LOG_MODE_INTERACT
+    if should_archive:
+        archive_run_log(
+            mode=RUN_LOG_MODE_INTERACT,
+            task_description=task_description,
+            scene_description=scene_description,
+            outcome=archive_outcome,
+            audience_video=latest_video,
+        )
 
 
 def append_simulation_logs(
@@ -1758,7 +2805,12 @@ def stop_current_run_without_cleanup():
         runtime.phase_key = "idle"
         runtime.status = "Stopped."
         runtime.task_text = ""
+        runtime.input_task_text = ""
+        runtime.input_scene_text = ""
         runtime.image_path = None
+        runtime.video_path = None
+        runtime.lerobot_video_path = None
+        runtime.lerobot_dataset_path = None
         runtime.object_model_path = None
         runtime.scene_model_path = None
         runtime.edited_scene_model_path = None
@@ -1784,33 +2836,60 @@ def stop_current_run_without_cleanup():
     )
 
 
-def run_reset_or_stop(top_mode: str):
-    if top_mode == TOP_MODE_AUTO:
+def run_reset_or_stop(run_mode: str):
+    if run_mode == TOP_MODE_AUTO:
         return stop_current_run_without_cleanup()
     return run_reset()
 
 
-def select_top_mode(top_mode: str):
-    if top_mode != TOP_MODE_AUTO:
+def select_top_mode(
+    selected_run_mode: str | None,
+    selected_action_mode: str | None,
+    current_run_mode: str,
+    current_action_mode: str | None,
+):
+    run_mode = selected_run_mode or current_run_mode or TOP_MODE_INTERACT
+    action_mode = current_action_mode
+    if selected_action_mode == TOP_MODE_PARALLEL_ENV:
+        action_mode = (
+            None
+            if action_mode == TOP_MODE_PARALLEL_ENV
+            else TOP_MODE_PARALLEL_ENV
+        )
+    elif selected_action_mode:
+        action_mode = selected_action_mode
+    if (
+        run_mode != current_run_mode
+        or action_mode != current_action_mode
+        or run_mode != TOP_MODE_AUTO
+    ):
         stop_auto_loop_if_running()
-    is_auto = top_mode == TOP_MODE_AUTO
-    is_interact = top_mode == TOP_MODE_INTERACT
-    is_robot_model = top_mode == TOP_MODE_ROBOT_MODEL
-    is_parallel_env = top_mode == TOP_MODE_PARALLEL_ENV
+    is_auto = run_mode == TOP_MODE_AUTO
+    is_interact = run_mode == TOP_MODE_INTERACT
+    is_parallel_env = action_mode == TOP_MODE_PARALLEL_ENV
     return (
         gr.update(variant="primary" if is_auto else "secondary"),
         gr.update(variant="primary" if is_interact else "secondary"),
-        gr.update(variant="primary" if is_robot_model else "secondary"),
         gr.update(variant="primary" if is_parallel_env else "secondary"),
         gr.update(value="Stop" if is_auto else "Reset"),
-        top_mode,
+        run_mode,
+        action_mode,
     )
 
 
 def ui_snapshot(extra_status: str | None = None):
     with runtime_lock:
         phase = PHASES.get(runtime.phase_key, PHASES["idle"])
-        image_value = runtime.image_path.as_posix() if runtime.image_path else None
+        video_value = (
+            runtime.video_path.as_posix()
+            if runtime.video_path and runtime.video_path.is_file()
+            else None
+        )
+        lerobot_video_value = (
+            runtime.lerobot_video_path.as_posix()
+            if runtime.lerobot_video_path and runtime.lerobot_video_path.is_file()
+            else None
+        )
         object_model_value = (
             runtime.object_model_path.as_posix()
             if runtime.object_model_path and runtime.object_model_path.is_file()
@@ -1831,11 +2910,11 @@ def ui_snapshot(extra_status: str | None = None):
         status_text = runtime.status
         if extra_status:
             status_text = f"{status_text}\n{extra_status}"
-        logs = list(runtime.log_lines)[-16:]
         busy = runtime.is_busy
         last_error = runtime.last_error
     return (
-        image_value,
+        video_value,
+        lerobot_video_value,
         task_text,
         phase.progress,
         format_status(
@@ -1843,12 +2922,30 @@ def ui_snapshot(extra_status: str | None = None):
             phase=phase,
             busy=busy,
             last_error=last_error,
-            logs=logs,
         ),
         model_value,
         edited_model_value,
         object_model_value,
     )
+
+
+def synced_ui_snapshot(run_mode: str | None = None):
+    sync_inputs = False
+    with runtime_lock:
+        sync_inputs = runtime.auto_loop_active or run_mode == TOP_MODE_AUTO
+        image_value = (
+            runtime.image_path.as_posix()
+            if runtime.image_path and runtime.image_path.is_file()
+            else None
+        )
+        input_task_text = runtime.input_task_text
+        input_scene_text = runtime.input_scene_text
+
+    if sync_inputs:
+        input_values = (image_value, input_task_text, input_scene_text)
+    else:
+        input_values = (gr.update(), gr.update(), gr.update())
+    return (*input_values, *ui_snapshot())
 
 
 def format_status(
@@ -1857,7 +2954,6 @@ def format_status(
     phase: Phase | None = None,
     busy: bool = False,
     last_error: str | None = None,
-    logs: list[str] | None = None,
 ) -> str:
     if phase is None:
         phase = PHASES["idle"]
@@ -1873,25 +2969,34 @@ def format_status(
             parts.append(f"**Last error:**\n```text\n{escaped_error}\n```")
         else:
             parts.append(f"**Last error:** `{escaped_error}`")
-    if logs:
-        escaped = "\n".join(line.replace("`", "'") for line in logs[-16:])
-        parts.append(f"**Recent logs:**\n```text\n{escaped}\n```")
     return "\n\n".join(parts)
 
 
 def build_demo() -> gr.Blocks:
-    with gr.Blocks(title="EmbodiChain Gradio") as demo:
-        top_mode = gr.State(TOP_MODE_ROBOT_MODEL)
+    with gr.Blocks(title="EmbodiChain Gradio", js=VIDEO_SYNC_JS) as demo:
+        run_mode = gr.State(TOP_MODE_INTERACT)
+        action_mode = gr.State(None)
         with gr.Row():
             gr.Markdown("# Generative Simulation User Interface")
             auto_button = gr.Button("Auto", variant="secondary")
-            interact_button = gr.Button("Interact", variant="secondary")
-            robot_model_button = gr.Button("Robot Model", variant="primary")
+            interact_button = gr.Button("Interact", variant="primary")
             parallel_env_button = gr.Button("Parallel Env", variant="secondary")
-        gr.Markdown(
-            "Upload one image, enter one task, and the local EmbodiChain pipeline "
-            "will generate the current scene."
-        )
+        with gr.Row():
+            with gr.Column(scale=4):
+                gr.HTML(
+                    "<div style='font-size: 20px; font-weight: 700; "
+                    "line-height: 1.35; min-height: 86px; display: flex; "
+                    "align-items: center;'>"
+                    "Upload one image, enter one task, then EmbodiChain "
+                    " will generate what you want."
+                    "</div>"
+                )
+            with gr.Column(scale=1):
+                robot_profile = gr.Radio(
+                    choices=[ROBOT_PROFILE_FRANKA, ROBOT_PROFILE_UR5],
+                    value=ROBOT_PROFILE_UR5,
+                    label="Robot",
+                )
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -1916,13 +3021,18 @@ def build_demo() -> gr.Blocks:
                 with gr.Row():
                     generate_button = gr.Button("Generate", variant="primary")
                     reset_button = gr.Button("Reset", variant="stop")
-            with gr.Column(scale=1):
-                current_image = gr.Image(
-                    label="Current saved image",
-                    type="filepath",
-                    interactive=False,
-                    height=320,
-                )
+            with gr.Column(scale=2):
+                with gr.Row():
+                    current_image = gr.Video(
+                        label="Current saved video",
+                        height=320,
+                        elem_id="embodichain-audience-video",
+                    )
+                    lerobot_preview = gr.Video(
+                        label="LeRobot data preview",
+                        height=320,
+                        elem_id="embodichain-lerobot-video",
+                    )
                 current_task = gr.Textbox(
                     label="Current task",
                     interactive=False,
@@ -1959,43 +3069,60 @@ def build_demo() -> gr.Blocks:
         top_mode_outputs = [
             auto_button,
             interact_button,
-            robot_model_button,
             parallel_env_button,
             reset_button,
-            top_mode,
+            run_mode,
+            action_mode,
         ]
         auto_button.click(
             select_top_mode,
-            inputs=[gr.State(TOP_MODE_AUTO)],
+            inputs=[
+                gr.State(TOP_MODE_AUTO),
+                gr.State(None),
+                run_mode,
+                action_mode,
+            ],
             outputs=top_mode_outputs,
             queue=False,
         )
         interact_button.click(
             select_top_mode,
-            inputs=[gr.State(TOP_MODE_INTERACT)],
-            outputs=top_mode_outputs,
-            queue=False,
-        )
-        robot_model_button.click(
-            select_top_mode,
-            inputs=[gr.State(TOP_MODE_ROBOT_MODEL)],
+            inputs=[
+                gr.State(TOP_MODE_INTERACT),
+                gr.State(None),
+                run_mode,
+                action_mode,
+            ],
             outputs=top_mode_outputs,
             queue=False,
         )
         parallel_env_button.click(
             select_top_mode,
-            inputs=[gr.State(TOP_MODE_PARALLEL_ENV)],
+            inputs=[
+                gr.State(None),
+                gr.State(TOP_MODE_PARALLEL_ENV),
+                run_mode,
+                action_mode,
+            ],
             outputs=top_mode_outputs,
             queue=False,
         )
         generate_button.click(
             run_generate_for_top_mode,
-            inputs=[top_mode, image_input, task_input, env_input],
+            inputs=[
+                run_mode,
+                action_mode,
+                robot_profile,
+                image_input,
+                task_input,
+                env_input,
+            ],
             outputs=[
                 image_input,
                 task_input,
                 env_input,
                 current_image,
+                lerobot_preview,
                 current_task,
                 progress,
                 status,
@@ -2006,12 +3133,13 @@ def build_demo() -> gr.Blocks:
         )
         reset_button.click(
             run_reset_or_stop,
-            inputs=[top_mode],
+            inputs=[run_mode],
             outputs=[
                 image_input,
                 task_input,
                 env_input,
                 current_image,
+                lerobot_preview,
                 current_task,
                 progress,
                 status,
@@ -2022,10 +3150,14 @@ def build_demo() -> gr.Blocks:
             queue=False,
         )
         refresh_timer.tick(
-            ui_snapshot,
-            inputs=[],
+            synced_ui_snapshot,
+            inputs=[run_mode],
             outputs=[
+                image_input,
+                task_input,
+                env_input,
                 current_image,
+                lerobot_preview,
                 current_task,
                 progress,
                 status,

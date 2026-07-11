@@ -11,7 +11,7 @@ import numpy as np
 
 
 EMBODICHAIN_ROOT = Path(
-    os.environ.get("EMBODICHAIN_ROOT", "/home/oem/桌面/EmbodiChain")
+    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/桌面/EmbodiChain")
 ).expanduser()
 IMAGE_DIR = Path(
     os.environ.get(
