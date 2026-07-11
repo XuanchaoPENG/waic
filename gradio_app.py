@@ -483,14 +483,15 @@ def build_initial_pipeline_command(
     task_text: str,
     paths: ScenePaths,
     prompt2scene_prompt: str = "",
+    robot_profile: str | None = None,
 ) -> list[str]:
     command = [
         sys.executable,
         "-m",
         "embodichain.gen_sim.action_agent_pipeline.cli.run_agent_pipeline",
         "--use-prompt2scene",
-        "--image-name",
-        paths.scene_id,
+        "--image",
+        str(paths.image_path.resolve()),
         "--prompt2scene-output-root",
         f"gym_project/{paths.scene_id}",
         "--config-output-dir",
@@ -503,13 +504,20 @@ def build_initial_pipeline_command(
         "--regenerate",
         "--skip-run-agent",
     ]
+    profile = robot_profile_cli_value(robot_profile)
+    if profile:
+        command.extend(["--robot-profile", profile])
     if prompt2scene_prompt.strip():
         command.extend(["--prompt2scene-prompt", prompt2scene_prompt.strip()])
     return command
 
 
-def build_edit_pipeline_command(task_text: str, env_text: str) -> list[str]:
-    return [
+def build_edit_pipeline_command(
+    task_text: str,
+    env_text: str,
+    robot_profile: str | None = None,
+) -> list[str]:
+    command = [
         sys.executable,
         "-m",
         "embodichain.gen_sim.action_agent_pipeline.cli.run_agent_pipeline",
@@ -528,6 +536,10 @@ def build_edit_pipeline_command(task_text: str, env_text: str) -> list[str]:
         "--regenerate",
         "--skip-run-agent",
     ]
+    profile = robot_profile_cli_value(robot_profile)
+    if profile:
+        command.extend(["--robot-profile", profile])
+    return command
 
 
 def build_task_only_config_command(
@@ -1089,7 +1101,6 @@ def build_run_agent_command(
     paths: ScenePaths,
     *,
     parallel_env: bool = False,
-    robot_profile: str | None = None,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -1103,8 +1114,6 @@ def build_run_agent_command(
         str(paths.agent_config),
         "--regenerate",
     ]
-    if robot_profile == ROBOT_PROFILE_FRANKA:
-        command.extend(["--robot-profile", "franka"])
     if parallel_env:
         command.extend(
             [
@@ -1864,11 +1873,16 @@ def run_generate(
         return
 
     if mode == PIPELINE_MODE_EDIT:
-        command = build_edit_pipeline_command(task_text, env_text)
+        command = build_edit_pipeline_command(task_text, env_text, robot_profile)
     elif mode == PIPELINE_MODE_TASK_ONLY:
         command = build_task_only_config_command(task_text, robot_profile)
     else:
-        command = build_initial_pipeline_command(task_text, stage, env_text)
+        command = build_initial_pipeline_command(
+            task_text,
+            stage,
+            env_text,
+            robot_profile,
+        )
     display_task_text = format_current_task(task_text, env_text)
     with runtime_lock:
         runtime.run_token = token
@@ -2637,7 +2651,6 @@ def launch_current_simulation(
     command = build_run_agent_command(
         CURRENT_PATHS,
         parallel_env=parallel_env,
-        robot_profile=robot_profile,
     )
     started_at_ns = time.time_ns()
     try:
