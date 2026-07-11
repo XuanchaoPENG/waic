@@ -74,6 +74,7 @@ GRADIO_OBJECT_PREVIEW_GLB = GRADIO_SCENE_DIR / "object_preview.glb"
 SCENE_MANIFEST = GRADIO_SCENE_DIR / "scene_manifest.json"
 PENDING_PREFIX = "_gradio_pending_"
 REPLACED_PREFIX = "_gradio_replaced_"
+GRADIO_SCENE_TRANSFORM_POLICY = "dexsim_gltf_y_up_to_sim_z_up_v1"
 
 PROCESS_STOP_TIMEOUT_S = 8.0
 TEXT_REWRITE_SUFFIXES = {
@@ -1256,6 +1257,7 @@ def build_gradio_scene_from_fast_config(
         "source_config": os.path.relpath(config_path, scene_dir),
         "source_config_size": config_stat.st_size,
         "source_config_mtime_ns": config_stat.st_mtime_ns,
+        "transform_policy": GRADIO_SCENE_TRANSFORM_POLICY,
         "objects": [],
     }
 
@@ -1272,6 +1274,9 @@ def build_gradio_scene_from_fast_config(
             raise FileNotFoundError(f"Mesh file not found for {obj.get('uid')}: {mesh_path}")
 
         transform = object_transform(obj)
+        frame_transform = gltf_to_sim_frame_transform(mesh_path)
+        if frame_transform is not None:
+            transform = transform @ frame_transform
         add_mesh_to_scene(scene, mesh_path, transform, str(obj.get("uid", "object")))
         manifest["objects"].append(
             {
@@ -1280,6 +1285,7 @@ def build_gradio_scene_from_fast_config(
                 "source_mesh": os.path.relpath(mesh_path, scene_dir),
                 "source_mesh_size": mesh_path.stat().st_size,
                 "source_mesh_mtime_ns": mesh_path.stat().st_mtime_ns,
+                "gltf_to_sim_frame": frame_transform is not None,
             }
         )
         object_count += 1
@@ -1316,6 +1322,8 @@ def gradio_scene_is_current(
         return False
     if manifest.get("source_config_mtime_ns") != config_stat.st_mtime_ns:
         return False
+    if manifest.get("transform_policy") != GRADIO_SCENE_TRANSFORM_POLICY:
+        return False
 
     expected_objects = []
     try:
@@ -1328,6 +1336,7 @@ def gradio_scene_is_current(
                 continue
             mesh_path = resolve_mesh_path(config_path.parent, str(raw_fpath))
             mesh_stat = mesh_path.stat()
+            frame_transform = gltf_to_sim_frame_transform(mesh_path)
             expected_objects.append(
                 {
                     "uid": obj.get("uid"),
@@ -1335,6 +1344,7 @@ def gradio_scene_is_current(
                     "source_mesh": os.path.relpath(mesh_path, manifest_path.parent),
                     "source_mesh_size": mesh_stat.st_size,
                     "source_mesh_mtime_ns": mesh_stat.st_mtime_ns,
+                    "gltf_to_sim_frame": frame_transform is not None,
                 }
             )
     except OSError:
