@@ -135,6 +135,10 @@ UI_TEXT = {
         "task_placeholder": "Put the middle bottle on the book",
         "scene_description": "Scene description",
         "scene_placeholder": "Optional: describe how to edit the current scene",
+        "scene_mode": "Generation mode",
+        "scene_mode_initial": "Initial generation",
+        "scene_mode_edit": "Edit current scene",
+        "scene_mode_task_only": "Change task only",
         "single_video_preview": "LeRobot Data Preview",
         "parallel_video_preview": "Parallel Env Data Preview",
         "current_task": "Current task",
@@ -152,6 +156,10 @@ UI_TEXT = {
         "task_placeholder": "把中间的水瓶放到书上",
         "scene_description": "场景描述",
         "scene_placeholder": "可选：描述如何编辑当前场景",
+        "scene_mode": "生成模式",
+        "scene_mode_initial": "初始生成",
+        "scene_mode_edit": "编辑当前场景",
+        "scene_mode_task_only": "仅修改任务",
         "single_video_preview": "LeRobot 数据预览",
         "parallel_video_preview": "并行环境数据预览",
         "current_task": "当前任务",
@@ -164,6 +172,9 @@ UI_TEXT = {
 PIPELINE_MODE_INITIAL = "initial"
 PIPELINE_MODE_EDIT = "edit"
 PIPELINE_MODE_TASK_ONLY = "task_only"
+SCENE_MODE_INITIAL = "initial"
+SCENE_MODE_EDIT = "edit"
+SCENE_MODE_TASK_ONLY = "task_only"
 ROBOT_PROFILE_FRANKA = "Franka"
 ROBOT_PROFILE_UR5 = "UR5"
 RUN_LOG_MODE_AUTO = "auto"
@@ -1999,6 +2010,7 @@ def run_generate(
     env_text: str,
     *,
     force_initial: bool = False,
+    scene_mode: str = SCENE_MODE_INITIAL,
     parallel_env: bool = False,
     robot_profile: str | None = None,
     run_log_mode: str = RUN_LOG_MODE_INTERACT,
@@ -2006,12 +2018,14 @@ def run_generate(
 ):
     task_text = (task_text or "").strip()
     env_text = (env_text or "").strip()
-    if env_text and not force_initial:
+    if force_initial or scene_mode == SCENE_MODE_INITIAL:
+        mode = PIPELINE_MODE_INITIAL
+    elif scene_mode == SCENE_MODE_EDIT:
         mode = PIPELINE_MODE_EDIT
-    elif not force_initial and current_scene_available_for_task_only():
+    elif scene_mode == SCENE_MODE_TASK_ONLY:
         mode = PIPELINE_MODE_TASK_ONLY
     else:
-        mode = PIPELINE_MODE_INITIAL
+        raise ValueError(f"Unsupported scene mode: {scene_mode}")
     old_sim_process: subprocess.Popen[str] | None = None
     with runtime_lock:
         if runtime.is_busy:
@@ -2043,6 +2057,8 @@ def run_generate(
         if mode == PIPELINE_MODE_EDIT:
             if not task_text:
                 raise ValueError("Please enter a task description.")
+            if not env_text:
+                raise ValueError("Please enter a scene description to edit.")
             initial_scene_path = prepare_current_scene_for_edit()
             image_path = IMAGE_PATH if IMAGE_PATH.is_file() else None
         elif mode == PIPELINE_MODE_TASK_ONLY:
@@ -2314,6 +2330,7 @@ def wait_for_current_simulation_to_exit(
 def run_generate_for_top_mode(
     run_mode: str,
     action_mode: str | None,
+    scene_mode: str,
     robot_profile: str | None,
     image_value: str | np.ndarray | Image.Image,
     task_text: str,
@@ -2327,6 +2344,7 @@ def run_generate_for_top_mode(
             task_text,
             env_text,
             force_initial=False,
+            scene_mode=scene_mode,
             parallel_env=parallel_env,
             robot_profile=robot_profile,
             run_log_mode=RUN_LOG_MODE_INTERACT,
@@ -2429,6 +2447,7 @@ def run_generate_for_top_mode(
             auto_task,
             auto_scene,
             force_initial=True,
+            scene_mode=SCENE_MODE_INITIAL,
             parallel_env=parallel_env,
             robot_profile=robot_profile,
             run_log_mode=RUN_LOG_MODE_AUTO,
@@ -3118,12 +3137,13 @@ def run_reset_or_stop(run_mode: str):
 def randomize_interact_input(run_mode: str | None, language: str | None):
     """Fill the Interact form with one available template scene and task."""
     if run_mode != TOP_MODE_INTERACT:
-        return gr.update(), gr.update(), gr.update()
+        return gr.update(), gr.update(), gr.update(), gr.update()
     auto_input = generate_auto_text_input(language=language or LANGUAGE_EN)
     return (
         auto_input.base_image_path.as_posix(),
         auto_input.task_description,
         auto_input.scene_description,
+        SCENE_MODE_INITIAL,
     )
 
 
@@ -3166,6 +3186,15 @@ def video_preview_label(language: str | None, action_mode: str | None) -> str:
     return text[key]
 
 
+def scene_mode_choices(language: str | None) -> list[tuple[str, str]]:
+    text = UI_TEXT.get(language or LANGUAGE_EN, UI_TEXT[LANGUAGE_EN])
+    return [
+        (text["scene_mode_initial"], SCENE_MODE_INITIAL),
+        (text["scene_mode_edit"], SCENE_MODE_EDIT),
+        (text["scene_mode_task_only"], SCENE_MODE_TASK_ONLY),
+    ]
+
+
 def localized_ui_updates(
     language: str | None,
     action_mode: str | None,
@@ -3189,6 +3218,10 @@ def localized_ui_updates(
         gr.update(
             label=text["scene_description"],
             placeholder=text["scene_placeholder"],
+        ),
+        gr.update(
+            label=text["scene_mode"],
+            choices=scene_mode_choices(language),
         ),
         gr.update(label=video_preview_label(language, action_mode)),
         gr.update(label=text["current_task"]),
@@ -3384,6 +3417,11 @@ def build_demo() -> gr.Blocks:
                         placeholder=UI_TEXT[LANGUAGE_EN]["scene_placeholder"],
                         lines=1,
                     )
+                scene_mode = gr.Radio(
+                    choices=scene_mode_choices(LANGUAGE_EN),
+                    value=SCENE_MODE_INITIAL,
+                    label=UI_TEXT[LANGUAGE_EN]["scene_mode"],
+                )
                 with gr.Row():
                     generate_button = gr.Button("Generate", variant="primary")
                     random_input_button = gr.Button("Random Input")
@@ -3491,6 +3529,7 @@ def build_demo() -> gr.Blocks:
                 image_input,
                 task_input,
                 env_input,
+                scene_mode,
                 current_image,
                 current_task,
                 progress,
@@ -3506,6 +3545,7 @@ def build_demo() -> gr.Blocks:
             inputs=[
                 run_mode,
                 action_mode,
+                scene_mode,
                 robot_profile,
                 image_input,
                 task_input,
@@ -3528,7 +3568,7 @@ def build_demo() -> gr.Blocks:
         random_input_button.click(
             randomize_interact_input,
             inputs=[run_mode, language],
-            outputs=[image_input, task_input, env_input],
+            outputs=[image_input, task_input, env_input, scene_mode],
             queue=False,
         )
         reset_button.click(

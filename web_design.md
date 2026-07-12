@@ -67,6 +67,7 @@ GRADIO_ANALYTICS_ENABLED=False
   Input image
   Task description
   Scene description
+  Generation mode: Initial generation / Edit current scene / Change task only
   Random Input
   Generate
   Reset / Stop
@@ -121,14 +122,14 @@ Parallel Simulation 打开时，run-agent 追加：
 
 - `Input image`：初始生成时必填，支持 upload 和 webcam，保存为 PNG。
 - `Task description`：必填，传给 action-agent。
-- `Scene description`：可选，用来判断初始生成还是编辑。
+- `Scene description`：初始生成时作为 Prompt2Scene 场景提示；编辑时作为对当前场景的编辑提示。
+- `Generation mode`：显式选择 `Initial generation`、`Edit current scene` 或 `Change task only`，不再根据 Scene description 是否为空推断模式。
 
-判断规则：
+模式规则：
 
-- `Scene description` 为空：初始生成。
-- `Scene description` 非空：编辑当前场景。
-
-编辑模式不要求重新上传图片，但要求已经有成功生成的当前场景。
+- `Initial generation`：需要 Input image；可选 Scene description 会加入初始 Prompt2Scene 生成。
+- `Edit current scene`：需要已有成功的当前场景和 Scene description；不要求重新上传图片。
+- `Change task only`：保留当前场景，只重新生成 action-agent config。
 
 ### Auto 模式
 
