@@ -58,7 +58,7 @@ GRADIO_ANALYTICS_ENABLED=False
 
 ```text
 顶部：
-  Auto | Interact | Parallel Env
+  Auto | Interact | Parallel Simulation | 中文 / English
 
 机器人选择：
   Robot: Franka / UR5
@@ -92,14 +92,15 @@ GRADIO_ANALYTICS_ENABLED=False
 
 - `Auto`：设置 `run_mode="auto"`，Reset 按钮显示为 Stop。
 - `Interact`：设置 `run_mode="interact"`。
-- `Parallel Env`：切换 `action_mode="parallel_env"`；它是叠加模式，不是独立 run mode。
+- `Parallel Simulation`：切换 `action_mode="parallel_env"`；它是叠加模式，不是独立 run mode。
+- `中文 / English`：切换所有页面按钮、标题、说明文字、输入/输出标签和预览标签的中英文文本；不会重置当前 run mode、Parallel Simulation 状态或 Reset/Stop 状态。
 
 Robot 单选：
 
 - `UR5`：run-agent 不追加 robot profile 参数。
 - `Franka`：run-agent 追加 `--robot-profile franka`。
 
-Parallel Env 打开时，run-agent 追加：
+Parallel Simulation 打开时，run-agent 追加：
 
 ```bash
 --num_envs 9 --arena_space 3 --filter_dataset_saving
@@ -109,7 +110,7 @@ Parallel Env 打开时，run-agent 追加：
 
 ### 手动模式
 
-手动模式由 `Interact` 进入，也可以叠加 `Parallel Env` 和 Robot 选择。
+手动模式由 `Interact` 进入，也可以叠加 `Parallel Simulation` 和 Robot 选择。
 
 输入：
 
@@ -230,7 +231,7 @@ python -m embodichain.gen_sim.action_agent_pipeline.cli.run_agent \
   --regenerate
 ```
 
-根据 UI 状态可能追加 Franka 或 Parallel Env 参数。
+根据 UI 状态可能追加 Franka 或 Parallel Simulation 参数。
 
 ## 输出文件
 
@@ -548,7 +549,7 @@ UI 会展示：
 已实现：
 
 1. 本地 Gradio UI。
-2. Auto / Interact / Parallel Env 顶部控制。
+2. Auto / Interact / Parallel Simulation 顶部控制。
 3. Robot 单选：UR5 / Franka。
 4. 图片上传和 webcam 输入。
 5. Task / Scene 双文本输入。

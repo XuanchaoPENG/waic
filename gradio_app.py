@@ -96,6 +96,67 @@ LEROBOT_PREVIEW_MAX_FRAMES = 360
 TOP_MODE_AUTO = "auto"
 TOP_MODE_INTERACT = "interact"
 TOP_MODE_PARALLEL_ENV = "parallel_env"
+LANGUAGE_EN = "en"
+LANGUAGE_ZH = "zh"
+BUTTON_LABELS = {
+    LANGUAGE_EN: {
+        "auto": "Auto",
+        "interact": "Interact",
+        "parallel_env": "Parallel Simulation",
+        "generate": "Generate",
+        "reset": "Reset",
+        "stop": "Stop",
+        "language": "中文",
+    },
+    LANGUAGE_ZH: {
+        "auto": "自动",
+        "interact": "交互",
+        "parallel_env": "并行仿真",
+        "generate": "生成",
+        "reset": "重置",
+        "stop": "停止",
+        "language": "English",
+    },
+}
+UI_TEXT = {
+    LANGUAGE_EN: {
+        "heading": "# Generative Simulation User Interface",
+        "instruction": (
+            "Upload one image, enter one task, then EmbodiChain "
+            "will generate what you want."
+        ),
+        "robot": "Robot",
+        "input_image": "Input image",
+        "task_description": "Task description",
+        "task_placeholder": "Put the middle bottle on the book",
+        "scene_description": "Scene description",
+        "scene_placeholder": "Optional: describe how to edit the current scene",
+        "current_video": "Current saved video",
+        "lerobot_preview": "LeRobot data preview",
+        "current_task": "Current task",
+        "progress": "Progress",
+        "initial_preview": "Initial scene preview",
+        "edited_preview": "Edited scene preview",
+        "object_preview": "Generated object GLBs preview",
+    },
+    LANGUAGE_ZH: {
+        "heading": "# 生成式仿真用户界面",
+        "instruction": "上传一张图片，输入一个任务，EmbodiChain 将生成所需的仿真。",
+        "robot": "机器人",
+        "input_image": "输入图像",
+        "task_description": "任务描述",
+        "task_placeholder": "把中间的水瓶放到书上",
+        "scene_description": "场景描述",
+        "scene_placeholder": "可选：描述如何编辑当前场景",
+        "current_video": "当前保存的视频",
+        "lerobot_preview": "LeRobot 数据预览",
+        "current_task": "当前任务",
+        "progress": "进度",
+        "initial_preview": "初始场景预览",
+        "edited_preview": "编辑后场景预览",
+        "object_preview": "生成对象 GLB 预览",
+    },
+}
 PIPELINE_MODE_INITIAL = "initial"
 PIPELINE_MODE_EDIT = "edit"
 PIPELINE_MODE_TASK_ONLY = "task_only"
@@ -2888,11 +2949,86 @@ def run_reset_or_stop(run_mode: str):
     return run_reset()
 
 
+def button_updates(
+    language: str | None,
+    run_mode: str | None,
+    action_mode: str | None,
+) -> tuple[Any, Any, Any, Any, Any]:
+    """Build localized labels while preserving the selected button variants."""
+    labels = BUTTON_LABELS.get(language or LANGUAGE_EN, BUTTON_LABELS[LANGUAGE_EN])
+    is_auto = run_mode == TOP_MODE_AUTO
+    is_interact = run_mode != TOP_MODE_AUTO
+    is_parallel_env = action_mode == TOP_MODE_PARALLEL_ENV
+    return (
+        gr.update(
+            value=labels["auto"],
+            variant="primary" if is_auto else "secondary",
+        ),
+        gr.update(
+            value=labels["interact"],
+            variant="primary" if is_interact else "secondary",
+        ),
+        gr.update(
+            value=labels["parallel_env"],
+            variant="primary" if is_parallel_env else "secondary",
+        ),
+        gr.update(value=labels["generate"]),
+        gr.update(value=labels["stop"] if is_auto else labels["reset"]),
+    )
+
+
+def localized_ui_updates(language: str | None) -> tuple[Any, ...]:
+    """Return updates for every non-button, user-facing static UI string."""
+    text = UI_TEXT.get(language or LANGUAGE_EN, UI_TEXT[LANGUAGE_EN])
+    instruction_html = (
+        "<div style='font-size: 20px; font-weight: 700; "
+        "line-height: 1.35; min-height: 86px; display: flex; "
+        f"align-items: center;'>{text['instruction']}</div>"
+    )
+    return (
+        gr.update(value=text["heading"]),
+        gr.update(value=instruction_html),
+        gr.update(label=text["robot"]),
+        gr.update(label=text["input_image"]),
+        gr.update(
+            label=text["task_description"],
+            placeholder=text["task_placeholder"],
+        ),
+        gr.update(
+            label=text["scene_description"],
+            placeholder=text["scene_placeholder"],
+        ),
+        gr.update(label=text["current_video"]),
+        gr.update(label=text["lerobot_preview"]),
+        gr.update(label=text["current_task"]),
+        gr.update(label=text["progress"]),
+        gr.update(label=text["initial_preview"]),
+        gr.update(label=text["edited_preview"]),
+        gr.update(label=text["object_preview"]),
+    )
+
+
+def toggle_language(
+    language: str | None,
+    run_mode: str | None,
+    action_mode: str | None,
+):
+    next_language = LANGUAGE_ZH if language != LANGUAGE_ZH else LANGUAGE_EN
+    labels = BUTTON_LABELS[next_language]
+    return (
+        *button_updates(next_language, run_mode, action_mode),
+        gr.update(value=labels["language"]),
+        *localized_ui_updates(next_language),
+        next_language,
+    )
+
+
 def select_top_mode(
     selected_run_mode: str | None,
     selected_action_mode: str | None,
     current_run_mode: str,
     current_action_mode: str | None,
+    language: str | None,
 ):
     run_mode = selected_run_mode or current_run_mode or TOP_MODE_INTERACT
     action_mode = current_action_mode
@@ -2910,14 +3046,8 @@ def select_top_mode(
         or run_mode != TOP_MODE_AUTO
     ):
         stop_auto_loop_if_running()
-    is_auto = run_mode == TOP_MODE_AUTO
-    is_interact = run_mode == TOP_MODE_INTERACT
-    is_parallel_env = action_mode == TOP_MODE_PARALLEL_ENV
     return (
-        gr.update(variant="primary" if is_auto else "secondary"),
-        gr.update(variant="primary" if is_interact else "secondary"),
-        gr.update(variant="primary" if is_parallel_env else "secondary"),
-        gr.update(value="Stop" if is_auto else "Reset"),
+        *button_updates(language, run_mode, action_mode),
         run_mode,
         action_mode,
     )
@@ -3022,14 +3152,16 @@ def build_demo() -> gr.Blocks:
     with gr.Blocks(title="EmbodiChain Gradio", js=VIDEO_SYNC_JS) as demo:
         run_mode = gr.State(TOP_MODE_INTERACT)
         action_mode = gr.State(None)
+        language = gr.State(LANGUAGE_EN)
         with gr.Row():
-            gr.Markdown("# Generative Simulation User Interface")
+            heading = gr.Markdown(UI_TEXT[LANGUAGE_EN]["heading"])
             auto_button = gr.Button("Auto", variant="secondary")
             interact_button = gr.Button("Interact", variant="primary")
-            parallel_env_button = gr.Button("Parallel Env", variant="secondary")
+            parallel_env_button = gr.Button("Parallel Simulation", variant="secondary")
+            language_button = gr.Button("中文", variant="secondary")
         with gr.Row():
             with gr.Column(scale=4):
-                gr.HTML(
+                instruction = gr.HTML(
                     "<div style='font-size: 20px; font-weight: 700; "
                     "line-height: 1.35; min-height: 86px; display: flex; "
                     "align-items: center;'>"
@@ -3041,13 +3173,13 @@ def build_demo() -> gr.Blocks:
                 robot_profile = gr.Radio(
                     choices=[ROBOT_PROFILE_FRANKA, ROBOT_PROFILE_UR5],
                     value=ROBOT_PROFILE_UR5,
-                    label="Robot",
+                    label=UI_TEXT[LANGUAGE_EN]["robot"],
                 )
 
         with gr.Row():
             with gr.Column(scale=1):
                 image_input = gr.Image(
-                    label="Input image",
+                    label=UI_TEXT[LANGUAGE_EN]["input_image"],
                     sources=["upload", "webcam"],
                     type="filepath",
                     format="png",
@@ -3055,13 +3187,13 @@ def build_demo() -> gr.Blocks:
                 )
                 with gr.Row():
                     task_input = gr.Textbox(
-                        label="Task description",
-                        placeholder="把中间的水瓶放到书上",
+                        label=UI_TEXT[LANGUAGE_EN]["task_description"],
+                        placeholder=UI_TEXT[LANGUAGE_EN]["task_placeholder"],
                         lines=1,
                     )
                     env_input = gr.Textbox(
-                        label="Scene description",
-                        placeholder="",
+                        label=UI_TEXT[LANGUAGE_EN]["scene_description"],
+                        placeholder=UI_TEXT[LANGUAGE_EN]["scene_placeholder"],
                         lines=1,
                     )
                 with gr.Row():
@@ -3070,17 +3202,17 @@ def build_demo() -> gr.Blocks:
             with gr.Column(scale=2):
                 with gr.Row():
                     current_image = gr.Video(
-                        label="Current saved video",
+                        label=UI_TEXT[LANGUAGE_EN]["current_video"],
                         height=320,
                         elem_id="embodichain-audience-video",
                     )
                     lerobot_preview = gr.Video(
-                        label="LeRobot data preview",
+                        label=UI_TEXT[LANGUAGE_EN]["lerobot_preview"],
                         height=320,
                         elem_id="embodichain-lerobot-video",
                     )
                 current_task = gr.Textbox(
-                    label="Current task",
+                    label=UI_TEXT[LANGUAGE_EN]["current_task"],
                     interactive=False,
                     lines=2,
                 )
@@ -3090,23 +3222,23 @@ def build_demo() -> gr.Blocks:
             maximum=100,
             value=0,
             step=1,
-            label="Progress",
+            label=UI_TEXT[LANGUAGE_EN]["progress"],
             interactive=False,
         )
         status = gr.Markdown(format_status("Idle."))
         with gr.Row():
             model = gr.Model3D(
-                label="Initial scene preview",
+                label=UI_TEXT[LANGUAGE_EN]["initial_preview"],
                 height=520,
                 clear_color=(0.94, 0.94, 0.94, 1.0),
             )
             edited_model = gr.Model3D(
-                label="Edited scene preview",
+                label=UI_TEXT[LANGUAGE_EN]["edited_preview"],
                 height=520,
                 clear_color=(0.94, 0.94, 0.94, 1.0),
             )
         object_model = gr.Model3D(
-            label="Generated object GLBs preview",
+            label=UI_TEXT[LANGUAGE_EN]["object_preview"],
             height=360,
             clear_color=(0.94, 0.94, 0.94, 1.0),
         )
@@ -3116,6 +3248,7 @@ def build_demo() -> gr.Blocks:
             auto_button,
             interact_button,
             parallel_env_button,
+            generate_button,
             reset_button,
             run_mode,
             action_mode,
@@ -3127,6 +3260,7 @@ def build_demo() -> gr.Blocks:
                 gr.State(None),
                 run_mode,
                 action_mode,
+                language,
             ],
             outputs=top_mode_outputs,
             queue=False,
@@ -3138,6 +3272,7 @@ def build_demo() -> gr.Blocks:
                 gr.State(None),
                 run_mode,
                 action_mode,
+                language,
             ],
             outputs=top_mode_outputs,
             queue=False,
@@ -3149,8 +3284,36 @@ def build_demo() -> gr.Blocks:
                 gr.State(TOP_MODE_PARALLEL_ENV),
                 run_mode,
                 action_mode,
+                language,
             ],
             outputs=top_mode_outputs,
+            queue=False,
+        )
+        language_button.click(
+            toggle_language,
+            inputs=[language, run_mode, action_mode],
+            outputs=[
+                auto_button,
+                interact_button,
+                parallel_env_button,
+                generate_button,
+                reset_button,
+                language_button,
+                heading,
+                instruction,
+                robot_profile,
+                image_input,
+                task_input,
+                env_input,
+                current_image,
+                lerobot_preview,
+                current_task,
+                progress,
+                model,
+                edited_model,
+                object_model,
+                language,
+            ],
             queue=False,
         )
         generate_button.click(
