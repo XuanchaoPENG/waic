@@ -58,6 +58,9 @@ from PIL import Image, ImageDraw, ImageOps
 EMBODICHAIN_ROOT = Path(
     os.environ.get("EMBODICHAIN_ROOT", "/home/dex/workspace/sources/EmbodiChain")
 ).expanduser()
+APP_ROOT = Path(__file__).resolve().parent
+ASSETS_DIR = APP_ROOT / "assets"
+DEXFORCE_LOGO = ASSETS_DIR / "dexforce.png"
 SCENE_ID = "current"
 
 GYM_PROJECT_ROOT = EMBODICHAIN_ROOT / "gym_project"
@@ -3374,8 +3377,17 @@ def build_demo() -> gr.Blocks:
         run_mode = gr.State(TOP_MODE_INTERACT)
         action_mode = gr.State(None)
         language = gr.State(LANGUAGE_EN)
-        with gr.Row():
+        with gr.Row(equal_height=True):
+            if DEXFORCE_LOGO.is_file():
+                gr.Image(
+                    value=str(DEXFORCE_LOGO),
+                    show_label=False,
+                    container=False,
+                    height=58,
+                    width=183,
+                )
             heading = gr.Markdown(UI_TEXT[LANGUAGE_EN]["heading"])
+        with gr.Row():
             auto_button = gr.Button("Auto", variant="secondary")
             interact_button = gr.Button("Interact", variant="primary")
             parallel_env_button = gr.Button("Parallel Simulation", variant="secondary")
@@ -3616,7 +3628,7 @@ def main() -> None:
     demo.launch(
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
-        allowed_paths=[str(EMBODICHAIN_ROOT)],
+        allowed_paths=[str(EMBODICHAIN_ROOT), str(ASSETS_DIR)],
     )
 
 
