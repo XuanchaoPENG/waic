@@ -1113,7 +1113,7 @@ def build_run_agent_command(
         "--agent_config",
         str(paths.agent_config),
         "--regenerate",
-        "renderer",
+        "--renderer",
         "fast-rt"
     ]
     if parallel_env:
