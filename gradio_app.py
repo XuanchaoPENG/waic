@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from random_input import IMAGE_DIR as AUTO_BASE_IMAGE_DIR
-from random_input import generate_auto_text_input
+from random_input import (
+    auto_image_directories,
+    available_auto_task_indices,
+    generate_auto_text_input,
+)
 
 PROXY_ENV_KEYS = (
     "HTTP_PROXY",
@@ -1986,6 +1990,21 @@ def start_auto_loop_state() -> str | None:
     with runtime_lock:
         if runtime.auto_loop_active or runtime.is_busy:
             runtime.status = "A pipeline run is already in progress."
+            return None
+
+        available_tasks = available_auto_task_indices()
+        if not available_tasks:
+            image_dirs = ", ".join(str(path) for path in auto_image_directories())
+            message = (
+                "Auto cannot start: no task input images were found. "
+                "Add task0_0.png through task4_3.png to one of: "
+                f"{image_dirs}"
+            )
+            runtime.phase_key = "failed"
+            runtime.status = message
+            runtime.last_error = message
+            runtime.log_lines.clear()
+            runtime.log_lines.append(message)
             return None
 
         token = uuid.uuid4().hex

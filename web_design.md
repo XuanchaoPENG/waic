@@ -167,7 +167,7 @@ run_generate(
 
 即使 `auto_scene` 非空，也不会进入编辑模式，而是作为 `--prompt2scene-prompt` 传给初始生成命令。
 
-当前 Gradio Auto loop 不调用 `random_input.generate_auto_image()`，也不调用 Ark/Doubao 图片生成接口；它只使用 `auto_images` 下已有的预置图片。
+当前 Gradio Auto loop 不调用 `random_input.generate_auto_image()`，也不调用 Ark/Doubao 图片生成接口；它只使用本地预置图片。默认优先读取 `auto_images`；若该目录没有对应图片且没有设置 `AUTO_IMAGE_DIR`，则回退到仓库自带的 `baseline_image_input`。Auto 只从实际存在的 `task<task>_<sub_task>.png` 中选择；若没有任何可用输入图，会在启动前报错并停止，而不会无限重试。
 
 ## 命令构造
 

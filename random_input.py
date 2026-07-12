@@ -19,6 +19,10 @@ IMAGE_DIR = Path(
         str(EMBODICHAIN_ROOT / "gym_project/action_agent_pipeline/auto_images"),
     )
 ).expanduser()
+AUTO_IMAGE_DIR_IS_CONFIGURED = "AUTO_IMAGE_DIR" in os.environ
+FALLBACK_IMAGE_DIR = (
+    EMBODICHAIN_ROOT / "gym_project/action_agent_pipeline/baseline_image_input"
+)
 GENERATED_IMAGE_DIR = Path(
     os.environ.get("AUTO_GENERATED_IMAGE_DIR", "./tmp_img/auto")
 ).expanduser()
@@ -57,7 +61,7 @@ TASK_DESCRIPTIONS: dict[tuple[int, int], str] = {
     (3, 2): "把桌面上的物体按照方块，爆米花桶，纸杯的顺序叠起来",
     (3, 3): "把桌面上的物体按照右边的爆米花桶，纸杯，固体胶的顺序叠起来",
     (4, 0): "把桌面上的方块摆成一排",
-    (4, 1): "把桌面上的物体按照瓶子，方块交错排成一排",
+    (4, 1): "把桌面上的物体按照瓶子，方块排成一排",
     (4, 2): "把桌面上的罐头摆成一排",
     (4, 3): "把桌面上的物体按照瓶子，罐头，方块的顺序摆成一排",
 }
@@ -146,14 +150,49 @@ class AutoInput:
         return value
 
 
+def auto_image_directories() -> tuple[Path, ...]:
+    """Return image sources in precedence order for the Auto loop.
+
+    A user-supplied ``AUTO_IMAGE_DIR`` is authoritative.  With the default
+    directory, retain compatibility with deployments that have the checked-in
+    ``baseline_image_input`` set but have not created ``auto_images`` yet.
+    """
+    directories = [IMAGE_DIR]
+    if not AUTO_IMAGE_DIR_IS_CONFIGURED and FALLBACK_IMAGE_DIR != IMAGE_DIR:
+        directories.append(FALLBACK_IMAGE_DIR)
+    return tuple(directories)
+
+
+def available_auto_task_indices() -> tuple[tuple[int, int], ...]:
+    """Return only task variants whose input image can be resolved."""
+    return tuple(
+        task_index
+        for task_index in TASK_DESCRIPTIONS
+        if any(
+            (image_dir / f"task{task_index[0]}_{task_index[1]}.png").is_file()
+            for image_dir in auto_image_directories()
+        )
+    )
+
+
 def random_task(rng: np.random.Generator) -> tuple[int, int]:
-    task = rng.integers(0, 5)
-    sub_task = rng.integers(0, 4)
-    return int(task), int(sub_task)
+    available_tasks = available_auto_task_indices()
+    if not available_tasks:
+        expected = ", ".join(str(path) for path in auto_image_directories())
+        raise FileNotFoundError(
+            "No Auto input images were found. Add task<task>_<sub_task>.png "
+            f"files to: {expected}"
+        )
+    return available_tasks[int(rng.integers(0, len(available_tasks)))]
 
 
 def get_base_image_path(task_index: tuple[int, int]) -> Path:
-    return IMAGE_DIR / f"task{task_index[0]}_{task_index[1]}.png"
+    filename = f"task{task_index[0]}_{task_index[1]}.png"
+    for image_dir in auto_image_directories():
+        candidate = image_dir / filename
+        if candidate.is_file():
+            return candidate
+    return IMAGE_DIR / filename
 
 
 def get_task_description(task_index: tuple[int, int]) -> str:
