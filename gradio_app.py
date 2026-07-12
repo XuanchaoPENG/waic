@@ -52,7 +52,7 @@ from PIL import Image, ImageDraw, ImageOps
 
 
 EMBODICHAIN_ROOT = Path(
-    os.environ.get("EMBODICHAIN_ROOT", "/home/oem/projects/EmbodiChain/")
+    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/EmbodiChain/")
 ).expanduser()
 SCENE_ID = "current"
 
