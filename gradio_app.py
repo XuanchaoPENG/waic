@@ -1122,7 +1122,7 @@ def build_run_agent_command(
                 "--num_envs",
                 "9",
                 "--arena_space",
-                "3",
+                "2.5",
                 "--filter_dataset_saving",
             ]
         )
