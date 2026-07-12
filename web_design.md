@@ -115,7 +115,7 @@ Parallel Simulation 打开时，run-agent 追加：
 
 手动模式由 `Interact` 进入，也可以叠加 `Parallel Simulation` 和 Robot 选择。
 
-`Random Input` 仅在 Interact 模式下显示。点击后会从可用本地模板中随机选择一张输入图，填写对应的任务描述，并生成随机场景描述；它不会直接启动 pipeline，仍需点击 `Generate`。
+`Random Input` 仅在 Interact 模式下显示。点击后会从可用本地模板中随机选择一张输入图，填写对应的任务描述，并生成随机场景描述；它不会直接启动 pipeline，仍需点击 `Generate`。随机任务和场景描述遵循页面的全局语言选择：English 生成英文描述，中文生成中文描述；Auto 模式的新一轮随机输入也遵循该选择。
 
 输入：
 

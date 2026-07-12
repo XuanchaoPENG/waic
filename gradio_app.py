@@ -285,6 +285,7 @@ class RuntimeState:
     auto_loop_active: bool = False
     auto_loop_token: str | None = None
     auto_round: int = 0
+    language: str = LANGUAGE_EN
     process: subprocess.Popen[str] | None = None
     sim_process: subprocess.Popen[str] | None = None
     sim_started: bool = False
@@ -2317,6 +2318,7 @@ def run_generate_for_top_mode(
     image_value: str | np.ndarray | Image.Image,
     task_text: str,
     env_text: str,
+    language: str | None,
 ):
     parallel_env = action_mode == TOP_MODE_PARALLEL_ENV
     if run_mode != TOP_MODE_AUTO:
@@ -2336,6 +2338,9 @@ def run_generate_for_top_mode(
     if loop_token is None:
         yield (gr.update(), gr.update(), gr.update(), *ui_snapshot())
         return
+
+    with runtime_lock:
+        runtime.language = language or LANGUAGE_EN
 
     while auto_loop_is_active(loop_token):
         auto_task = ""
@@ -2361,7 +2366,9 @@ def run_generate_for_top_mode(
             break
 
         try:
-            auto_input = generate_auto_text_input()
+            with runtime_lock:
+                selected_language = runtime.language
+            auto_input = generate_auto_text_input(language=selected_language)
         except Exception as exc:
             if not auto_loop_is_active(loop_token):
                 break
@@ -3108,11 +3115,11 @@ def run_reset_or_stop(run_mode: str):
     return run_reset()
 
 
-def randomize_interact_input(run_mode: str | None):
+def randomize_interact_input(run_mode: str | None, language: str | None):
     """Fill the Interact form with one available template scene and task."""
     if run_mode != TOP_MODE_INTERACT:
         return gr.update(), gr.update(), gr.update()
-    auto_input = generate_auto_text_input()
+    auto_input = generate_auto_text_input(language=language or LANGUAGE_EN)
     return (
         auto_input.base_image_path.as_posix(),
         auto_input.task_description,
@@ -3198,6 +3205,8 @@ def toggle_language(
     action_mode: str | None,
 ):
     next_language = LANGUAGE_ZH if language != LANGUAGE_ZH else LANGUAGE_EN
+    with runtime_lock:
+        runtime.language = next_language
     labels = BUTTON_LABELS[next_language]
     return (
         *button_updates(next_language, run_mode, action_mode),
@@ -3501,6 +3510,7 @@ def build_demo() -> gr.Blocks:
                 image_input,
                 task_input,
                 env_input,
+                language,
             ],
             outputs=[
                 image_input,
@@ -3517,7 +3527,7 @@ def build_demo() -> gr.Blocks:
         )
         random_input_button.click(
             randomize_interact_input,
-            inputs=[run_mode],
+            inputs=[run_mode, language],
             outputs=[image_input, task_input, env_input],
             queue=False,
         )
