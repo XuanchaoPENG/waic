@@ -104,6 +104,7 @@ BUTTON_LABELS = {
         "interact": "Interact",
         "parallel_env": "Parallel Simulation",
         "generate": "Generate",
+        "random_input": "Random Input",
         "reset": "Reset",
         "stop": "Stop",
         "language": "中文",
@@ -113,6 +114,7 @@ BUTTON_LABELS = {
         "interact": "交互",
         "parallel_env": "并行仿真",
         "generate": "生成",
+        "random_input": "随机填充",
         "reset": "重置",
         "stop": "停止",
         "language": "English",
@@ -468,7 +470,6 @@ def cleanup_auto_generated_artifacts(extra_image_path: Path | None = None) -> li
         runtime.image_path = None
         runtime.input_task_text = ""
         runtime.input_scene_text = ""
-        runtime.video_path = None
         runtime.lerobot_video_path = None
         runtime.lerobot_dataset_path = None
         runtime.object_model_path = None
@@ -759,6 +760,23 @@ def archive_audience_video(
         return copied_paths, errors
     copied_paths.append(destination.relative_to(run_dir))
     return copied_paths, errors
+
+
+def archived_audience_video_path(log_path: Path | None) -> Path | None:
+    """Return the audience-video copy created alongside an archived run log."""
+    if log_path is None:
+        return None
+    archive_dir = log_path.parent / "audience_video"
+    if not archive_dir.is_dir():
+        return None
+    videos = [
+        path
+        for path in archive_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
+    ]
+    if not videos:
+        return None
+    return max(videos, key=lambda path: path.stat().st_mtime_ns)
 
 
 def collect_output_videos() -> list[Path]:
@@ -1866,6 +1884,7 @@ def run_generate(
     parallel_env: bool = False,
     robot_profile: str | None = None,
     run_log_mode: str = RUN_LOG_MODE_INTERACT,
+    preserve_previous_video: bool = False,
 ):
     task_text = (task_text or "").strip()
     env_text = (env_text or "").strip()
@@ -1965,7 +1984,8 @@ def run_generate(
         runtime.input_task_text = task_text
         runtime.input_scene_text = env_text
         runtime.image_path = image_path
-        runtime.video_path = None
+        if not preserve_previous_video:
+            runtime.video_path = None
         runtime.lerobot_video_path = None
         runtime.lerobot_dataset_path = None
         runtime.object_model_path = existing_object_preview_path
@@ -2251,7 +2271,6 @@ def run_generate_for_top_mode(
             runtime.input_task_text = auto_task
             runtime.input_scene_text = auto_scene
             runtime.image_path = auto_input.base_image_path
-            runtime.video_path = None
             runtime.lerobot_video_path = None
             runtime.lerobot_dataset_path = None
             runtime.phase_key = "received"
@@ -2289,6 +2308,7 @@ def run_generate_for_top_mode(
             parallel_env=parallel_env,
             robot_profile=robot_profile,
             run_log_mode=RUN_LOG_MODE_AUTO,
+            preserve_previous_video=True,
         ):
             yield (base_image, auto_task, auto_scene, *snapshot)
             if not auto_loop_is_active(loop_token):
@@ -2346,11 +2366,21 @@ def run_generate_for_top_mode(
                 and runtime.sim_process is None
             )
             round_outcome = "completed" if simulation_completed else "simulation_failed"
-        archive_run_log(
+        log_path = archive_run_log(
             mode=RUN_LOG_MODE_AUTO,
             task_description=auto_task,
             scene_description=auto_scene,
             outcome=round_outcome,
+        )
+        archived_video = archived_audience_video_path(log_path)
+        if archived_video is not None:
+            with runtime_lock:
+                runtime.video_path = archived_video
+        yield (
+            base_image,
+            auto_task,
+            auto_scene,
+            *ui_snapshot(extra_status="Auto video archived and ready to play."),
         )
         cleanup_errors = cleanup_auto_generated_artifacts()
         if cleanup_errors:
@@ -2949,11 +2979,23 @@ def run_reset_or_stop(run_mode: str):
     return run_reset()
 
 
+def randomize_interact_input(run_mode: str | None):
+    """Fill the Interact form with one available template scene and task."""
+    if run_mode != TOP_MODE_INTERACT:
+        return gr.update(), gr.update(), gr.update()
+    auto_input = generate_auto_text_input()
+    return (
+        auto_input.base_image_path.as_posix(),
+        auto_input.task_description,
+        auto_input.scene_description,
+    )
+
+
 def button_updates(
     language: str | None,
     run_mode: str | None,
     action_mode: str | None,
-) -> tuple[Any, Any, Any, Any, Any]:
+) -> tuple[Any, Any, Any, Any, Any, Any]:
     """Build localized labels while preserving the selected button variants."""
     labels = BUTTON_LABELS.get(language or LANGUAGE_EN, BUTTON_LABELS[LANGUAGE_EN])
     is_auto = run_mode == TOP_MODE_AUTO
@@ -2973,6 +3015,7 @@ def button_updates(
             variant="primary" if is_parallel_env else "secondary",
         ),
         gr.update(value=labels["generate"]),
+        gr.update(value=labels["random_input"], visible=is_interact),
         gr.update(value=labels["stop"] if is_auto else labels["reset"]),
     )
 
@@ -3198,6 +3241,7 @@ def build_demo() -> gr.Blocks:
                     )
                 with gr.Row():
                     generate_button = gr.Button("Generate", variant="primary")
+                    random_input_button = gr.Button("Random Input")
                     reset_button = gr.Button("Reset", variant="stop")
             with gr.Column(scale=2):
                 with gr.Row():
@@ -3249,6 +3293,7 @@ def build_demo() -> gr.Blocks:
             interact_button,
             parallel_env_button,
             generate_button,
+            random_input_button,
             reset_button,
             run_mode,
             action_mode,
@@ -3297,6 +3342,7 @@ def build_demo() -> gr.Blocks:
                 interact_button,
                 parallel_env_button,
                 generate_button,
+                random_input_button,
                 reset_button,
                 language_button,
                 heading,
@@ -3339,6 +3385,12 @@ def build_demo() -> gr.Blocks:
                 edited_model,
                 object_model,
             ],
+        )
+        random_input_button.click(
+            randomize_interact_input,
+            inputs=[run_mode],
+            outputs=[image_input, task_input, env_input],
+            queue=False,
         )
         reset_button.click(
             run_reset_or_stop,

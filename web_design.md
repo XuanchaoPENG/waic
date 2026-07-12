@@ -67,6 +67,7 @@ GRADIO_ANALYTICS_ENABLED=False
   Input image
   Task description
   Scene description
+  Random Input
   Generate
   Reset / Stop
 
@@ -111,6 +112,8 @@ Parallel Simulation 打开时，run-agent 追加：
 ### 手动模式
 
 手动模式由 `Interact` 进入，也可以叠加 `Parallel Simulation` 和 Robot 选择。
+
+`Random Input` 仅在 Interact 模式下显示。点击后会从可用本地模板中随机选择一张输入图，填写对应的任务描述，并生成随机场景描述；它不会直接启动 pipeline，仍需点击 `Generate`。
 
 输入：
 
@@ -168,7 +171,7 @@ run_generate(
 
 即使 `auto_scene` 非空，也不会进入编辑模式，而是作为 `--prompt2scene-prompt` 传给初始生成命令。
 
-当前 Gradio Auto loop 不调用 `random_input.generate_auto_image()`，也不调用 Ark/Doubao 图片生成接口；它只使用本地预置图片。默认优先读取 `auto_images`；若该目录没有对应图片且没有设置 `AUTO_IMAGE_DIR`，则回退到仓库自带的 `baseline_image_input`。Auto 只从实际存在的 `task<task>_<sub_task>.png` 中选择；若没有任何可用输入图，会在启动前报错并停止，而不会无限重试。
+当前 Gradio Auto loop 不调用 `random_input.generate_auto_image()`，也不调用 Ark/Doubao 图片生成接口；它只使用本地预置图片。默认优先读取 `auto_images`；若该目录没有对应图片且没有设置 `AUTO_IMAGE_DIR`，则回退到仓库自带的 `baseline_image_input`。Auto 只从实际存在的 `task<task>_<sub_task>.png` 中选择；若没有任何可用输入图，会在启动前报错并停止，而不会无限重试。每轮 DexSim 成功后的 audience video 会复制到该轮 `auto_logs/<index>/audience_video/`，并作为页面当前视频保留到下一轮视频完成。
 
 ## 命令构造
 
