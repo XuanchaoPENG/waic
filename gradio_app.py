@@ -1113,12 +1113,14 @@ def build_run_agent_command(
         "--agent_config",
         str(paths.agent_config),
         "--regenerate",
+        "renderer",
+        "fast-rt"
     ]
     if parallel_env:
         command.extend(
             [
                 "--num_envs",
-                "2",
+                "9",
                 "--arena_space",
                 "3",
                 "--filter_dataset_saving",
