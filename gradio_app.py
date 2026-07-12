@@ -92,7 +92,9 @@ TEXT_REWRITE_SUFFIXES = {
 }
 VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 LEROBOT_PREVIEW_DIR = OUTPUTS_DIR / "lerobot_previews"
+COMBINED_PREVIEW_DIR = OUTPUTS_DIR / "combined_previews"
 LEROBOT_PREVIEW_MAX_FRAMES = 360
+COMBINED_VIDEO_FPS = 25
 TOP_MODE_AUTO = "auto"
 TOP_MODE_INTERACT = "interact"
 TOP_MODE_PARALLEL_ENV = "parallel_env"
@@ -133,8 +135,8 @@ UI_TEXT = {
         "task_placeholder": "Put the middle bottle on the book",
         "scene_description": "Scene description",
         "scene_placeholder": "Optional: describe how to edit the current scene",
-        "current_video": "Current saved video",
-        "lerobot_preview": "LeRobot data preview",
+        "single_video_preview": "LeRobot Data Preview",
+        "parallel_video_preview": "Parallel Env Data Preview",
         "current_task": "Current task",
         "progress": "Progress",
         "initial_preview": "Initial scene preview",
@@ -150,8 +152,8 @@ UI_TEXT = {
         "task_placeholder": "把中间的水瓶放到书上",
         "scene_description": "场景描述",
         "scene_placeholder": "可选：描述如何编辑当前场景",
-        "current_video": "当前保存的视频",
-        "lerobot_preview": "LeRobot 数据预览",
+        "single_video_preview": "LeRobot 数据预览",
+        "parallel_video_preview": "并行环境数据预览",
         "current_task": "当前任务",
         "progress": "进度",
         "initial_preview": "初始场景预览",
@@ -898,6 +900,8 @@ def latest_lerobot_dataset(min_mtime_ns: int | None = None) -> Path | None:
     latest_path: Path | None = None
     latest_mtime = -1
     for dataset_path in collect_lerobot_datasets():
+        if not lerobot_dataset_has_frames(dataset_path):
+            continue
         mtime = latest_lerobot_dataset_mtime_ns(dataset_path)
         if min_mtime_ns is not None and mtime < min_mtime_ns:
             continue
@@ -905,6 +909,11 @@ def latest_lerobot_dataset(min_mtime_ns: int | None = None) -> Path | None:
             latest_path = dataset_path
             latest_mtime = mtime
     return latest_path
+
+
+def lerobot_dataset_has_frames(dataset_path: Path) -> bool:
+    data_dir = dataset_path / "data"
+    return data_dir.is_dir() and any(data_dir.rglob("*.parquet"))
 
 
 def latest_lerobot_dataset_mtime_ns(dataset_path: Path) -> int:
@@ -974,6 +983,114 @@ def build_lerobot_preview_video(dataset_path: Path) -> Path | None:
         return None
 
     return output_path
+
+
+def video_duration_seconds(video_path: Path) -> float | None:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        duration = float(result.stdout.strip())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return duration if duration > 0 else None
+
+
+def build_single_env_combined_video(
+    audience_video: Path | None,
+    lerobot_video: Path | None,
+) -> Path | None:
+    """Create a synchronized side-by-side simulation and LeRobot video."""
+    if (
+        audience_video is None
+        or lerobot_video is None
+        or not audience_video.is_file()
+        or not lerobot_video.is_file()
+    ):
+        return None
+
+    audience_duration = video_duration_seconds(audience_video)
+    lerobot_duration = video_duration_seconds(lerobot_video)
+    if audience_duration is None or lerobot_duration is None:
+        return None
+
+    latest_source_mtime = max(
+        audience_video.stat().st_mtime_ns,
+        lerobot_video.stat().st_mtime_ns,
+    )
+    output_path = (
+        COMBINED_PREVIEW_DIR
+        / f"{safe_filename_part(audience_video.stem)}_with_lerobot.mp4"
+    )
+    if output_path.is_file() and output_path.stat().st_mtime_ns >= latest_source_mtime:
+        return output_path
+
+    lerobot_time_scale = audience_duration / lerobot_duration
+    filter_graph = (
+        f"[0:v]fps={COMBINED_VIDEO_FPS},scale=960:540:force_original_aspect_ratio=decrease,"
+        "pad=960:540:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
+        "setpts=PTS-STARTPTS[sim];"
+        f"[1:v]fps={COMBINED_VIDEO_FPS},scale=960:540:force_original_aspect_ratio=decrease,"
+        "pad=960:540:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
+        f"setpts=(PTS-STARTPTS)*{lerobot_time_scale:.9f}[data];"
+        "[sim][data]hstack=inputs=2:shortest=1,format=yuv420p[video]"
+    )
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(audience_video),
+        "-i",
+        str(lerobot_video),
+        "-filter_complex",
+        filter_graph,
+        "-map",
+        "[video]",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=180,
+        )
+        if result.returncode == 0 and output_path.is_file():
+            return output_path
+        with runtime_lock:
+            runtime.log_lines.append(
+                "Combined video skipped: "
+                + (result.stderr.strip().splitlines()[-1] if result.stderr else "ffmpeg failed")
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        with runtime_lock:
+            runtime.log_lines.append(f"Combined video skipped: {exc}")
+    return None
 
 
 def read_lerobot_fps(dataset_path: Path) -> int | None:
@@ -2787,6 +2904,7 @@ def launch_current_simulation(
             run_log_mode,
             task_description,
             scene_description,
+            parallel_env,
         ),
         daemon=True,
     )
@@ -2820,6 +2938,7 @@ def monitor_simulation(
     run_log_mode: str,
     task_description: str,
     scene_description: str,
+    parallel_env: bool,
 ) -> None:
     while process.poll() is None:
         append_simulation_logs(token, process, drain_output_queue(output_queue))
@@ -2834,6 +2953,12 @@ def monitor_simulation(
         if latest_dataset is not None
         else None
     )
+    combined_video = (
+        build_single_env_combined_video(latest_video, lerobot_video)
+        if not parallel_env
+        else None
+    )
+    display_video = combined_video or latest_video
 
     should_archive = False
     archive_outcome = "completed"
@@ -2843,18 +2968,24 @@ def monitor_simulation(
         runtime.sim_process = None
         runtime.sim_finished = True
         runtime.sim_returncode = process.returncode
-        runtime.video_path = latest_video
+        runtime.video_path = display_video
         runtime.lerobot_dataset_path = latest_dataset
-        runtime.lerobot_video_path = lerobot_video
+        runtime.lerobot_video_path = None if combined_video is not None else lerobot_video
         if process.returncode == 0:
             runtime.status = "Pipeline completed successfully.\nDexsim simulation finished."
             if latest_video is None:
                 runtime.log_lines.append("Audience video not found in outputs.")
             if latest_dataset is None:
-                runtime.log_lines.append("LeRobot dataset not found.")
+                runtime.log_lines.append(
+                    "LeRobot dataset with recorded frames not found."
+                )
             elif lerobot_video is None:
                 runtime.log_lines.append(
                     f"LeRobot dataset found, but preview was not generated: {latest_dataset}"
+                )
+            elif combined_video is not None:
+                runtime.log_lines.append(
+                    f"Single-env combined video created: {combined_video}"
                 )
         else:
             runtime.status = (
@@ -2872,7 +3003,7 @@ def monitor_simulation(
             task_description=task_description,
             scene_description=scene_description,
             outcome=archive_outcome,
-            audience_video=latest_video,
+            audience_video=display_video,
         )
 
 
@@ -2911,7 +3042,6 @@ def run_reset():
         None,
         "",
         "",
-        None,
         None,
         "",
         PHASES["idle"].progress,
@@ -2962,7 +3092,6 @@ def stop_current_run_without_cleanup():
         None,
         "",
         "",
-        None,
         None,
         "",
         PHASES["idle"].progress,
@@ -3020,7 +3149,20 @@ def button_updates(
     )
 
 
-def localized_ui_updates(language: str | None) -> tuple[Any, ...]:
+def video_preview_label(language: str | None, action_mode: str | None) -> str:
+    text = UI_TEXT.get(language or LANGUAGE_EN, UI_TEXT[LANGUAGE_EN])
+    key = (
+        "parallel_video_preview"
+        if action_mode == TOP_MODE_PARALLEL_ENV
+        else "single_video_preview"
+    )
+    return text[key]
+
+
+def localized_ui_updates(
+    language: str | None,
+    action_mode: str | None,
+) -> tuple[Any, ...]:
     """Return updates for every non-button, user-facing static UI string."""
     text = UI_TEXT.get(language or LANGUAGE_EN, UI_TEXT[LANGUAGE_EN])
     instruction_html = (
@@ -3041,8 +3183,7 @@ def localized_ui_updates(language: str | None) -> tuple[Any, ...]:
             label=text["scene_description"],
             placeholder=text["scene_placeholder"],
         ),
-        gr.update(label=text["current_video"]),
-        gr.update(label=text["lerobot_preview"]),
+        gr.update(label=video_preview_label(language, action_mode)),
         gr.update(label=text["current_task"]),
         gr.update(label=text["progress"]),
         gr.update(label=text["initial_preview"]),
@@ -3061,7 +3202,7 @@ def toggle_language(
     return (
         *button_updates(next_language, run_mode, action_mode),
         gr.update(value=labels["language"]),
-        *localized_ui_updates(next_language),
+        *localized_ui_updates(next_language, action_mode),
         next_language,
     )
 
@@ -3091,6 +3232,7 @@ def select_top_mode(
         stop_auto_loop_if_running()
     return (
         *button_updates(language, run_mode, action_mode),
+        gr.update(label=video_preview_label(language, action_mode)),
         run_mode,
         action_mode,
     )
@@ -3102,11 +3244,6 @@ def ui_snapshot(extra_status: str | None = None):
         video_value = (
             runtime.video_path.as_posix()
             if runtime.video_path and runtime.video_path.is_file()
-            else None
-        )
-        lerobot_video_value = (
-            runtime.lerobot_video_path.as_posix()
-            if runtime.lerobot_video_path and runtime.lerobot_video_path.is_file()
             else None
         )
         object_model_value = (
@@ -3133,7 +3270,6 @@ def ui_snapshot(extra_status: str | None = None):
         last_error = runtime.last_error
     return (
         video_value,
-        lerobot_video_value,
         task_text,
         phase.progress,
         format_status(
@@ -3192,7 +3328,7 @@ def format_status(
 
 
 def build_demo() -> gr.Blocks:
-    with gr.Blocks(title="EmbodiChain Gradio", js=VIDEO_SYNC_JS) as demo:
+    with gr.Blocks(title="EmbodiChain Gradio") as demo:
         run_mode = gr.State(TOP_MODE_INTERACT)
         action_mode = gr.State(None)
         language = gr.State(LANGUAGE_EN)
@@ -3244,17 +3380,11 @@ def build_demo() -> gr.Blocks:
                     random_input_button = gr.Button("Random Input")
                     reset_button = gr.Button("Reset", variant="stop")
             with gr.Column(scale=2):
-                with gr.Row():
-                    current_image = gr.Video(
-                        label=UI_TEXT[LANGUAGE_EN]["current_video"],
-                        height=320,
-                        elem_id="embodichain-audience-video",
-                    )
-                    lerobot_preview = gr.Video(
-                        label=UI_TEXT[LANGUAGE_EN]["lerobot_preview"],
-                        height=320,
-                        elem_id="embodichain-lerobot-video",
-                    )
+                current_image = gr.Video(
+                    label=UI_TEXT[LANGUAGE_EN]["single_video_preview"],
+                    height=420,
+                    elem_id="embodichain-video-preview",
+                )
                 current_task = gr.Textbox(
                     label=UI_TEXT[LANGUAGE_EN]["current_task"],
                     interactive=False,
@@ -3295,6 +3425,7 @@ def build_demo() -> gr.Blocks:
             generate_button,
             random_input_button,
             reset_button,
+            current_image,
             run_mode,
             action_mode,
         ]
@@ -3352,7 +3483,6 @@ def build_demo() -> gr.Blocks:
                 task_input,
                 env_input,
                 current_image,
-                lerobot_preview,
                 current_task,
                 progress,
                 model,
@@ -3377,7 +3507,6 @@ def build_demo() -> gr.Blocks:
                 task_input,
                 env_input,
                 current_image,
-                lerobot_preview,
                 current_task,
                 progress,
                 status,
@@ -3400,7 +3529,6 @@ def build_demo() -> gr.Blocks:
                 task_input,
                 env_input,
                 current_image,
-                lerobot_preview,
                 current_task,
                 progress,
                 status,
@@ -3418,7 +3546,6 @@ def build_demo() -> gr.Blocks:
                 task_input,
                 env_input,
                 current_image,
-                lerobot_preview,
                 current_task,
                 progress,
                 status,

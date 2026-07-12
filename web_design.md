@@ -72,7 +72,7 @@ GRADIO_ANALYTICS_ENABLED=False
   Reset / Stop
 
 输出区：
-  Current saved video
+  LeRobot Data Preview / Parallel Env Data Preview
   Current task
   Progress
   Status
@@ -80,6 +80,8 @@ GRADIO_ANALYTICS_ENABLED=False
   Edited scene preview
   Generated object GLBs preview
 ```
+
+页面只保留一个视频预览位。单环境运行在同时生成 audience video 和包含记录帧的 LeRobot dataset 时，会生成一个左右拼接、按时长同步的 combined video，并显示在 `LeRobot Data Preview`。打开 Parallel Simulation 后，该预览位标题改为 `Parallel Env Data Preview`。若 LeRobot dataset 只包含 `meta/info.json` 而没有 `data/*.parquet`，页面会记录该数据集没有可预览帧。
 
 默认状态：
 
