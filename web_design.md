@@ -82,6 +82,8 @@ GRADIO_ANALYTICS_ENABLED=False
   Generated object GLBs preview
 ```
 
+Auto 模式下还会显示 `Previous Auto Run` 区域，保留上一轮已完成运行的输入图、完整任务（包括场景描述）和归档视频。它会在下一轮生成期间继续可见，并在切换回 Interact 时隐藏。
+
 页面只保留一个视频预览位。单环境运行在同时生成 audience video 和包含记录帧的 LeRobot dataset 时，会生成一个左右拼接、按时长同步的 combined video，并显示在 `LeRobot Data Preview`。打开 Parallel Simulation 后，该预览位标题改为 `Parallel Env Data Preview`。若 LeRobot dataset 只包含 `meta/info.json` 而没有 `data/*.parquet`，页面会记录该数据集没有可预览帧。
 
 默认状态：

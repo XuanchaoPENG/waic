@@ -142,6 +142,10 @@ UI_TEXT = {
         "scene_mode_initial": "Initial generation",
         "scene_mode_edit": "Edit current scene",
         "scene_mode_task_only": "Change task only",
+        "previous_auto_run": "### Previous Auto Run",
+        "previous_auto_image": "Previous input image",
+        "previous_auto_task": "Previous task",
+        "previous_auto_video": "Previous run preview",
         "single_video_preview": "LeRobot Data Preview",
         "parallel_video_preview": "Parallel Env Data Preview",
         "current_task": "Current task",
@@ -163,6 +167,10 @@ UI_TEXT = {
         "scene_mode_initial": "初始生成",
         "scene_mode_edit": "编辑当前场景",
         "scene_mode_task_only": "仅修改任务",
+        "previous_auto_run": "### 上一轮自动运行",
+        "previous_auto_image": "上一轮输入图像",
+        "previous_auto_task": "上一轮任务",
+        "previous_auto_video": "上一轮运行预览",
         "single_video_preview": "LeRobot 数据预览",
         "parallel_video_preview": "并行环境数据预览",
         "current_task": "当前任务",
@@ -314,6 +322,9 @@ class RuntimeState:
     video_path: Path | None = None
     lerobot_video_path: Path | None = None
     lerobot_dataset_path: Path | None = None
+    previous_auto_image_path: Path | None = None
+    previous_auto_task_text: str = ""
+    previous_auto_video_path: Path | None = None
     object_model_path: Path | None = None
     scene_model_path: Path | None = None
     edited_scene_model_path: Path | None = None
@@ -439,6 +450,9 @@ def reset_current_scene() -> list[str]:
         runtime.video_path = None
         runtime.lerobot_video_path = None
         runtime.lerobot_dataset_path = None
+        runtime.previous_auto_image_path = None
+        runtime.previous_auto_task_text = ""
+        runtime.previous_auto_video_path = None
         runtime.object_model_path = None
         runtime.scene_model_path = None
         runtime.edited_scene_model_path = None
@@ -2241,6 +2255,9 @@ def start_auto_loop_state() -> str | None:
         runtime.video_path = None
         runtime.lerobot_video_path = None
         runtime.lerobot_dataset_path = None
+        runtime.previous_auto_image_path = None
+        runtime.previous_auto_task_text = ""
+        runtime.previous_auto_video_path = None
         runtime.last_error = None
         runtime.log_lines.clear()
 
@@ -2297,6 +2314,9 @@ def stop_auto_loop_if_running() -> bool:
         runtime.video_path = None
         runtime.lerobot_video_path = None
         runtime.lerobot_dataset_path = None
+        runtime.previous_auto_image_path = None
+        runtime.previous_auto_task_text = ""
+        runtime.previous_auto_video_path = None
         runtime.object_model_path = None
         runtime.scene_model_path = None
         runtime.edited_scene_model_path = None
@@ -2327,6 +2347,7 @@ def wait_for_current_simulation_to_exit(
             auto_task,
             auto_scene,
             *ui_snapshot(extra_status="Auto waiting for Dexsim to exit."),
+            *auto_history_snapshot(),
         )
 
 
@@ -2352,12 +2373,24 @@ def run_generate_for_top_mode(
             robot_profile=robot_profile,
             run_log_mode=RUN_LOG_MODE_INTERACT,
         ):
-            yield (gr.update(), gr.update(), gr.update(), *snapshot)
+            yield (
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                *snapshot,
+                *auto_history_snapshot(),
+            )
         return
 
     loop_token = start_auto_loop_state()
     if loop_token is None:
-        yield (gr.update(), gr.update(), gr.update(), *ui_snapshot())
+        yield (
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            *ui_snapshot(),
+            *auto_history_snapshot(),
+        )
         return
 
     with runtime_lock:
@@ -2398,7 +2431,13 @@ def run_generate_for_top_mode(
                 runtime.status = f"Auto text generation failed: {exc}"
                 runtime.last_error = str(exc)
                 runtime.log_lines.append(runtime.status)
-            yield (gr.update(), gr.update(), gr.update(), *ui_snapshot())
+            yield (
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                *ui_snapshot(),
+                *auto_history_snapshot(),
+            )
             archive_run_log(
                 mode=RUN_LOG_MODE_AUTO,
                 task_description=auto_task,
@@ -2416,6 +2455,7 @@ def run_generate_for_top_mode(
             runtime.input_task_text = auto_task
             runtime.input_scene_text = auto_scene
             runtime.image_path = auto_input.base_image_path
+            runtime.video_path = None
             runtime.lerobot_video_path = None
             runtime.lerobot_dataset_path = None
             runtime.phase_key = "received"
@@ -2434,6 +2474,7 @@ def run_generate_for_top_mode(
             auto_task,
             auto_scene,
             *ui_snapshot(extra_status=f"Auto text generated: {task_label}."),
+            *auto_history_snapshot(),
         )
 
         if not auto_loop_is_active(loop_token):
@@ -2454,9 +2495,15 @@ def run_generate_for_top_mode(
             parallel_env=parallel_env,
             robot_profile=robot_profile,
             run_log_mode=RUN_LOG_MODE_AUTO,
-            preserve_previous_video=True,
+            preserve_previous_video=False,
         ):
-            yield (base_image, auto_task, auto_scene, *snapshot)
+            yield (
+                base_image,
+                auto_task,
+                auto_scene,
+                *snapshot,
+                *auto_history_snapshot(),
+            )
             if not auto_loop_is_active(loop_token):
                 break
 
@@ -2519,14 +2566,17 @@ def run_generate_for_top_mode(
             outcome=round_outcome,
         )
         archived_video = archived_audience_video_path(log_path)
-        if archived_video is not None:
-            with runtime_lock:
-                runtime.video_path = archived_video
+        with runtime_lock:
+            runtime.previous_auto_image_path = Path(base_image)
+            runtime.previous_auto_task_text = runtime.task_text
+            runtime.previous_auto_video_path = archived_video or runtime.video_path
+            runtime.video_path = None
         yield (
             base_image,
             auto_task,
             auto_scene,
             *ui_snapshot(extra_status="Auto video archived and ready to play."),
+            *auto_history_snapshot(),
         )
         cleanup_errors = cleanup_auto_generated_artifacts()
         if cleanup_errors:
@@ -3078,6 +3128,7 @@ def run_reset():
         None,
         None,
         None,
+        *auto_history_snapshot(),
     )
 
 
@@ -3106,6 +3157,9 @@ def stop_current_run_without_cleanup():
         runtime.video_path = None
         runtime.lerobot_video_path = None
         runtime.lerobot_dataset_path = None
+        runtime.previous_auto_image_path = None
+        runtime.previous_auto_task_text = ""
+        runtime.previous_auto_video_path = None
         runtime.object_model_path = None
         runtime.scene_model_path = None
         runtime.edited_scene_model_path = None
@@ -3128,6 +3182,7 @@ def stop_current_run_without_cleanup():
         None,
         None,
         None,
+        *auto_history_snapshot(),
     )
 
 
@@ -3232,6 +3287,10 @@ def localized_ui_updates(
         gr.update(label=text["initial_preview"]),
         gr.update(label=text["edited_preview"]),
         gr.update(label=text["object_preview"]),
+        gr.update(value=text["previous_auto_run"]),
+        gr.update(label=text["previous_auto_image"]),
+        gr.update(label=text["previous_auto_task"]),
+        gr.update(label=text["previous_auto_video"]),
     )
 
 
@@ -3278,6 +3337,7 @@ def select_top_mode(
     return (
         *button_updates(language, run_mode, action_mode),
         gr.update(label=video_preview_label(language, action_mode)),
+        gr.update(visible=run_mode == TOP_MODE_AUTO),
         run_mode,
         action_mode,
     )
@@ -3329,6 +3389,25 @@ def ui_snapshot(extra_status: str | None = None):
     )
 
 
+def auto_history_snapshot() -> tuple[str | None, str, str | None]:
+    """Return the last completed Auto round for the Auto-only history panel."""
+    with runtime_lock:
+        image_value = (
+            runtime.previous_auto_image_path.as_posix()
+            if runtime.previous_auto_image_path
+            and runtime.previous_auto_image_path.is_file()
+            else None
+        )
+        video_value = (
+            runtime.previous_auto_video_path.as_posix()
+            if runtime.previous_auto_video_path
+            and runtime.previous_auto_video_path.is_file()
+            else None
+        )
+        task_value = runtime.previous_auto_task_text
+    return image_value, task_value, video_value
+
+
 def synced_ui_snapshot(run_mode: str | None = None):
     sync_inputs = False
     with runtime_lock:
@@ -3345,7 +3424,7 @@ def synced_ui_snapshot(run_mode: str | None = None):
         input_values = (image_value, input_task_text, input_scene_text)
     else:
         input_values = (gr.update(), gr.update(), gr.update())
-    return (*input_values, *ui_snapshot())
+    return (*input_values, *ui_snapshot(), *auto_history_snapshot())
 
 
 def format_status(
@@ -3450,6 +3529,29 @@ def build_demo() -> gr.Blocks:
                     lines=2,
                 )
 
+        with gr.Column(visible=False) as auto_history_section:
+            auto_history_heading = gr.Markdown(
+                UI_TEXT[LANGUAGE_EN]["previous_auto_run"]
+            )
+            with gr.Row():
+                with gr.Column(scale=1, min_width=190):
+                    previous_auto_image = gr.Image(
+                        label=UI_TEXT[LANGUAGE_EN]["previous_auto_image"],
+                        interactive=False,
+                        height=160,
+                    )
+                with gr.Column(scale=1, min_width=250):
+                    previous_auto_task = gr.Textbox(
+                        label=UI_TEXT[LANGUAGE_EN]["previous_auto_task"],
+                        interactive=False,
+                        lines=4,
+                    )
+                with gr.Column(scale=3, min_width=520):
+                    previous_auto_video = gr.Video(
+                        label=UI_TEXT[LANGUAGE_EN]["previous_auto_video"],
+                        height=320,
+                    )
+
         progress = gr.Slider(
             minimum=0,
             maximum=100,
@@ -3485,6 +3587,7 @@ def build_demo() -> gr.Blocks:
             random_input_button,
             reset_button,
             current_image,
+            auto_history_section,
             run_mode,
             action_mode,
         ]
@@ -3548,6 +3651,10 @@ def build_demo() -> gr.Blocks:
                 model,
                 edited_model,
                 object_model,
+                auto_history_heading,
+                previous_auto_image,
+                previous_auto_task,
+                previous_auto_video,
                 language,
             ],
             queue=False,
@@ -3575,6 +3682,9 @@ def build_demo() -> gr.Blocks:
                 model,
                 edited_model,
                 object_model,
+                previous_auto_image,
+                previous_auto_task,
+                previous_auto_video,
             ],
         )
         random_input_button.click(
@@ -3597,6 +3707,9 @@ def build_demo() -> gr.Blocks:
                 model,
                 edited_model,
                 object_model,
+                previous_auto_image,
+                previous_auto_task,
+                previous_auto_video,
             ],
             queue=False,
         )
@@ -3614,6 +3727,9 @@ def build_demo() -> gr.Blocks:
                 model,
                 edited_model,
                 object_model,
+                previous_auto_image,
+                previous_auto_task,
+                previous_auto_video,
             ],
             queue=False,
         )
