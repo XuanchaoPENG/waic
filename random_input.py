@@ -11,12 +11,12 @@ import numpy as np
 
 
 EMBODICHAIN_ROOT = Path(
-    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/workspace/sources/EmbodiChain")
+    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/桌面/EmbodiChain")
 ).expanduser()
 IMAGE_DIR = Path(
     os.environ.get(
         "AUTO_IMAGE_DIR",
-        str(EMBODICHAIN_ROOT / "gym_project/action_agent_pipeline/auto_images"),
+        str(EMBODICHAIN_ROOT / "gym_project/action_agent_pipesline/auto_images"),
     )
 ).expanduser()
 AUTO_IMAGE_DIR_IS_CONFIGURED = "AUTO_IMAGE_DIR" in os.environ

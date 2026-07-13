@@ -56,7 +56,7 @@ from PIL import Image, ImageDraw, ImageOps
 
 
 EMBODICHAIN_ROOT = Path(
-    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/workspace/sources/EmbodiChain")
+    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/桌面/EmbodiChain")
 ).expanduser()
 APP_ROOT = Path(__file__).resolve().parent
 ASSETS_DIR = APP_ROOT / "assets"
@@ -1343,7 +1343,7 @@ def build_run_agent_command(
         str(paths.agent_config),
         "--regenerate",
         "--renderer",
-        "fast-rt"
+        "hybrid"
     ]
     if parallel_env:
         command.extend(
