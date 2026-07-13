@@ -11,7 +11,7 @@ import numpy as np
 
 
 EMBODICHAIN_ROOT = Path(
-    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/桌面/EmbodiChain")
+    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/workspace/sources/EmbodiChain")
 ).expanduser()
 IMAGE_DIR = Path(
     os.environ.get(
@@ -19,6 +19,10 @@ IMAGE_DIR = Path(
         str(EMBODICHAIN_ROOT / "gym_project/action_agent_pipeline/auto_images"),
     )
 ).expanduser()
+AUTO_IMAGE_DIR_IS_CONFIGURED = "AUTO_IMAGE_DIR" in os.environ
+FALLBACK_IMAGE_DIR = (
+    EMBODICHAIN_ROOT / "gym_project/action_agent_pipeline/baseline_image_input"
+)
 GENERATED_IMAGE_DIR = Path(
     os.environ.get("AUTO_GENERATED_IMAGE_DIR", "./tmp_img/auto")
 ).expanduser()
@@ -56,10 +60,33 @@ TASK_DESCRIPTIONS: dict[tuple[int, int], str] = {
     (3, 1): "把桌面上的物体按照右边的方块，左边的方块，纸杯的顺序叠起来",
     (3, 2): "把桌面上的物体按照方块，爆米花桶，纸杯的顺序叠起来",
     (3, 3): "把桌面上的物体按照右边的爆米花桶，纸杯，固体胶的顺序叠起来",
-    (4, 0): "把桌面上的盒子方块摆成一排",
-    (4, 1): "把桌面上的物体按照瓶子，方块摆成一排",
+    (4, 0): "把桌面上的方块摆成一排",
+    (4, 1): "把桌面上的物体按照瓶子，方块排成一排",
     (4, 2): "把桌面上的罐头摆成一排",
     (4, 3): "把桌面上的物体按照瓶子，罐头，方块的顺序摆成一排",
+}
+
+TASK_DESCRIPTIONS_EN: dict[tuple[int, int], str] = {
+    (0, 0): "Use both arms to put the cans and bottles on both sides into the basket.",
+    (0, 1): "Use both arms to put the blocks on both sides into the basket.",
+    (0, 2): "Use both arms to put the blocks and paper cups on both sides into the basket.",
+    (0, 3): "Use both arms to put the blocks and apples on both sides into the basket.",
+    (1, 0): "Use both arms to move the plastic bucket forward.",
+    (1, 1): "Use both arms to move the cup forward.",
+    (1, 2): "Use both arms to move the rectangular block forward.",
+    (1, 3): "Use both arms to move the tray forward.",
+    (2, 0): "Use both arms to upright the bottles on both sides.",
+    (2, 1): "Use both arms to upright the cans on both sides.",
+    (2, 2): "Use both arms to upright the bottles and cans on both sides.",
+    (2, 3): "Use both arms to upright the paper cups and cans on both sides.",
+    (3, 0): "Use the right arm to stack the middle block on the right white block, then use the left arm to place the left block on top.",
+    (3, 1): "Stack the tabletop objects in this order: right block, left block, paper cup.",
+    (3, 2): "Stack the tabletop objects in this order: block, popcorn bucket, paper cup.",
+    (3, 3): "Stack the tabletop objects in this order: right popcorn bucket, paper cup, glue stick.",
+    (4, 0): "Arrange the blocks on the table in a row.",
+    (4, 1): "Arrange the tabletop objects in an alternating row of bottles and blocks.",
+    (4, 2): "Arrange the cans on the table in a row.",
+    (4, 3): "Arrange the tabletop objects in this order: bottle, can, block.",
 }
 
 RELATION_PATTERN = {
@@ -129,6 +156,57 @@ OBJECT_LIST = [
     "keyboard",
 ]
 
+CHINESE_OBJECT_NAMES = {
+    "cup": "杯子",
+    "potted plant": "盆栽",
+    "clock": "时钟",
+    "book": "书",
+    "pen": "笔",
+    "bottle": "瓶子",
+    "soda can": "易拉罐",
+    "photo frame": "相框",
+    "apple": "苹果",
+    "peach": "桃子",
+    "bread": "面包",
+    "chocolate bar": "巧克力棒",
+    "cookie": "饼干",
+    "penholder": "笔筒",
+    "desk lamp": "台灯",
+    "stapler": "订书机",
+    "headphones": "耳机",
+    "desk calendar": "台历",
+    "eyeglasses": "眼镜",
+    "fan": "风扇",
+    "bluetooth speaker": "蓝牙音箱",
+    "table mirror": "桌面镜子",
+    "computer mouse": "鼠标",
+    "keyboard": "键盘",
+}
+
+CHINESE_SPATIAL_RELATIONS = {
+    "at the left side of the can": "罐头左侧",
+    "at the right side of the bottle": "瓶子右侧",
+    "at the left side of the left cheese cube": "左侧奶酪方块左侧",
+    "at the right side of the right cheese cube": "右侧奶酪方块右侧",
+    "at the left side of the cube": "方块左侧",
+    "at the right side of the cup": "杯子右侧",
+    "at the right side of the apple": "苹果右侧",
+    "at the left side of the left bottle": "左侧瓶子左侧",
+    "at the right side of the right bottle": "右侧瓶子右侧",
+    "at the left side of the left soda can": "左侧易拉罐左侧",
+    "at the right side of the right soda can": "右侧易拉罐右侧",
+    "at the left side of the bottle": "瓶子左侧",
+    "at the right side of the can": "罐头右侧",
+    "at the left side of the paper cup": "纸杯左侧",
+    "at the right side of the soda can": "易拉罐右侧",
+    "at the left side of the table": "桌子左侧",
+    "at the right side of the table": "桌子右侧",
+    "at the back of the table": "桌子后侧",
+    "at the back right corner of the table": "桌子右后角",
+    "at the back left corner of the table": "桌子左后角",
+    "on the table": "桌面上",
+}
+
 
 @dataclass(frozen=True)
 class AutoInput:
@@ -146,19 +224,55 @@ class AutoInput:
         return value
 
 
+def auto_image_directories() -> tuple[Path, ...]:
+    """Return image sources in precedence order for the Auto loop.
+
+    A user-supplied ``AUTO_IMAGE_DIR`` is authoritative.  With the default
+    directory, retain compatibility with deployments that have the checked-in
+    ``baseline_image_input`` set but have not created ``auto_images`` yet.
+    """
+    directories = [IMAGE_DIR]
+    if not AUTO_IMAGE_DIR_IS_CONFIGURED and FALLBACK_IMAGE_DIR != IMAGE_DIR:
+        directories.append(FALLBACK_IMAGE_DIR)
+    return tuple(directories)
+
+
+def available_auto_task_indices() -> tuple[tuple[int, int], ...]:
+    """Return only task variants whose input image can be resolved."""
+    return tuple(
+        task_index
+        for task_index in TASK_DESCRIPTIONS
+        if any(
+            (image_dir / f"task{task_index[0]}_{task_index[1]}.png").is_file()
+            for image_dir in auto_image_directories()
+        )
+    )
+
+
 def random_task(rng: np.random.Generator) -> tuple[int, int]:
-    task = rng.integers(0, 5)
-    sub_task = rng.integers(0, 4)
-    return int(task), int(sub_task)
+    available_tasks = available_auto_task_indices()
+    if not available_tasks:
+        expected = ", ".join(str(path) for path in auto_image_directories())
+        raise FileNotFoundError(
+            "No Auto input images were found. Add task<task>_<sub_task>.png "
+            f"files to: {expected}"
+        )
+    return available_tasks[int(rng.integers(0, len(available_tasks)))]
 
 
 def get_base_image_path(task_index: tuple[int, int]) -> Path:
-    return IMAGE_DIR / f"task{task_index[0]}_{task_index[1]}.png"
+    filename = f"task{task_index[0]}_{task_index[1]}.png"
+    for image_dir in auto_image_directories():
+        candidate = image_dir / filename
+        if candidate.is_file():
+            return candidate
+    return IMAGE_DIR / filename
 
 
-def get_task_description(task_index: tuple[int, int]) -> str:
+def get_task_description(task_index: tuple[int, int], *, language: str = "zh") -> str:
+    descriptions = TASK_DESCRIPTIONS_EN if language == "en" else TASK_DESCRIPTIONS
     try:
-        return TASK_DESCRIPTIONS[task_index]
+        return descriptions[task_index]
     except KeyError as exc:
         raise KeyError(f"No task description configured for task{task_index}") from exc
 
@@ -223,7 +337,12 @@ def create_image_input(
     return output_path
 
 
-def create_text_input(task_index: tuple[int, int], rng: np.random.Generator) -> str:
+def create_text_input(
+    task_index: tuple[int, int],
+    rng: np.random.Generator,
+    *,
+    language: str = "en",
+) -> str:
     text_parts: list[str] = []
     if task_index[0] == 4:
         return ""
@@ -248,8 +367,16 @@ def create_text_input(task_index: tuple[int, int], rng: np.random.Generator) -> 
 
     for obj in selected_objects:
         selected_spatial = rng.choice(spatial_candidates)
-        article = "an" if obj[0].lower() in {"a", "e", "i", "o", "u"} else "a"
-        text_parts.append(f"Place {article} {obj} {selected_spatial}.")
+        if language == "zh":
+            chinese_object = CHINESE_OBJECT_NAMES.get(obj, obj)
+            chinese_relation = CHINESE_SPATIAL_RELATIONS.get(
+                selected_spatial,
+                selected_spatial,
+            )
+            text_parts.append(f"将一个{chinese_object}放在{chinese_relation}。")
+        else:
+            article = "an" if obj[0].lower() in {"a", "e", "i", "o", "u"} else "a"
+            text_parts.append(f"Place {article} {obj} {selected_spatial}.")
 
     return " ".join(text_parts)
 
@@ -258,6 +385,7 @@ def generate_auto_text_input(
     *,
     rng: np.random.Generator | None = None,
     task_index: tuple[int, int] | None = None,
+    language: str = "en",
 ) -> AutoInput:
     rng = rng or np.random.default_rng()
     task_index = task_index or random_task(rng)
@@ -268,8 +396,8 @@ def generate_auto_text_input(
         task_index=task_index,
         base_image_path=base_image_path,
         image_path=None,
-        task_description=get_task_description(task_index),
-        scene_description=create_text_input(task_index, rng),
+        task_description=get_task_description(task_index, language=language),
+        scene_description=create_text_input(task_index, rng, language=language),
     )
 
 
@@ -291,8 +419,13 @@ def generate_auto_input(
     rng: np.random.Generator | None = None,
     task_index: tuple[int, int] | None = None,
     output_dir: Path = GENERATED_IMAGE_DIR,
+    language: str = "en",
 ) -> AutoInput:
-    auto_input = generate_auto_text_input(rng=rng, task_index=task_index)
+    auto_input = generate_auto_text_input(
+        rng=rng,
+        task_index=task_index,
+        language=language,
+    )
     return generate_auto_image(auto_input, output_dir=output_dir)
 
 

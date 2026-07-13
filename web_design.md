@@ -58,7 +58,7 @@ GRADIO_ANALYTICS_ENABLED=False
 
 ```text
 顶部：
-  Auto | Interact | Parallel Env
+  Auto | Interact | Parallel Simulation | 中文 / English
 
 机器人选择：
   Robot: Franka / UR5
@@ -67,11 +67,13 @@ GRADIO_ANALYTICS_ENABLED=False
   Input image
   Task description
   Scene description
+  Generation mode: Initial generation / Edit current scene / Change task only
+  Random Input
   Generate
   Reset / Stop
 
 输出区：
-  Current saved video
+  LeRobot Data Preview / Parallel Env Data Preview
   Current task
   Progress
   Status
@@ -79,6 +81,8 @@ GRADIO_ANALYTICS_ENABLED=False
   Edited scene preview
   Generated object GLBs preview
 ```
+
+页面只保留一个视频预览位。单环境运行在同时生成 audience video 和包含记录帧的 LeRobot dataset 时，会生成一个左右拼接、按时长同步的 combined video，并显示在 `LeRobot Data Preview`。打开 Parallel Simulation 后，该预览位标题改为 `Parallel Env Data Preview`。若 LeRobot dataset 只包含 `meta/info.json` 而没有 `data/*.parquet`，页面会记录该数据集没有可预览帧。
 
 默认状态：
 
@@ -92,14 +96,15 @@ GRADIO_ANALYTICS_ENABLED=False
 
 - `Auto`：设置 `run_mode="auto"`，Reset 按钮显示为 Stop。
 - `Interact`：设置 `run_mode="interact"`。
-- `Parallel Env`：切换 `action_mode="parallel_env"`；它是叠加模式，不是独立 run mode。
+- `Parallel Simulation`：切换 `action_mode="parallel_env"`；它是叠加模式，不是独立 run mode。
+- `中文 / English`：切换所有页面按钮、标题、说明文字、输入/输出标签和预览标签的中英文文本；不会重置当前 run mode、Parallel Simulation 状态或 Reset/Stop 状态。
 
 Robot 单选：
 
 - `UR5`：run-agent 不追加 robot profile 参数。
 - `Franka`：run-agent 追加 `--robot-profile franka`。
 
-Parallel Env 打开时，run-agent 追加：
+Parallel Simulation 打开时，run-agent 追加：
 
 ```bash
 --num_envs 9 --arena_space 3 --filter_dataset_saving
@@ -109,20 +114,22 @@ Parallel Env 打开时，run-agent 追加：
 
 ### 手动模式
 
-手动模式由 `Interact` 进入，也可以叠加 `Parallel Env` 和 Robot 选择。
+手动模式由 `Interact` 进入，也可以叠加 `Parallel Simulation` 和 Robot 选择。
+
+`Random Input` 仅在 Interact 模式下显示。点击后会从可用本地模板中随机选择一张输入图，填写对应的任务描述，并生成随机场景描述；它不会直接启动 pipeline，仍需点击 `Generate`。随机任务和场景描述遵循页面的全局语言选择：English 生成英文描述，中文生成中文描述；Auto 模式的新一轮随机输入也遵循该选择。
 
 输入：
 
 - `Input image`：初始生成时必填，支持 upload 和 webcam，保存为 PNG。
 - `Task description`：必填，传给 action-agent。
-- `Scene description`：可选，用来判断初始生成还是编辑。
+- `Scene description`：初始生成时作为 Prompt2Scene 场景提示；编辑时作为对当前场景的编辑提示。
+- `Generation mode`：显式选择 `Initial generation`、`Edit current scene` 或 `Change task only`，不再根据 Scene description 是否为空推断模式。
 
-判断规则：
+模式规则：
 
-- `Scene description` 为空：初始生成。
-- `Scene description` 非空：编辑当前场景。
-
-编辑模式不要求重新上传图片，但要求已经有成功生成的当前场景。
+- `Initial generation`：需要 Input image；可选 Scene description 会加入初始 Prompt2Scene 生成。
+- `Edit current scene`：需要已有成功的当前场景和 Scene description；不要求重新上传图片。
+- `Change task only`：保留当前场景，只重新生成 action-agent config。
 
 ### Auto 模式
 
@@ -167,7 +174,7 @@ run_generate(
 
 即使 `auto_scene` 非空，也不会进入编辑模式，而是作为 `--prompt2scene-prompt` 传给初始生成命令。
 
-当前 Gradio Auto loop 不调用 `random_input.generate_auto_image()`，也不调用 Ark/Doubao 图片生成接口；它只使用 `auto_images` 下已有的预置图片。
+当前 Gradio Auto loop 不调用 `random_input.generate_auto_image()`，也不调用 Ark/Doubao 图片生成接口；它只使用本地预置图片。默认优先读取 `auto_images`；若该目录没有对应图片且没有设置 `AUTO_IMAGE_DIR`，则回退到仓库自带的 `baseline_image_input`。Auto 只从实际存在的 `task<task>_<sub_task>.png` 中选择；若没有任何可用输入图，会在启动前报错并停止，而不会无限重试。每轮 DexSim 成功后的 audience video 会复制到该轮 `auto_logs/<index>/audience_video/`，并作为页面当前视频保留到下一轮视频完成。
 
 ## 命令构造
 
@@ -230,7 +237,7 @@ python -m embodichain.gen_sim.action_agent_pipeline.cli.run_agent \
   --regenerate
 ```
 
-根据 UI 状态可能追加 Franka 或 Parallel Env 参数。
+根据 UI 状态可能追加 Franka 或 Parallel Simulation 参数。
 
 ## 输出文件
 
@@ -548,7 +555,7 @@ UI 会展示：
 已实现：
 
 1. 本地 Gradio UI。
-2. Auto / Interact / Parallel Env 顶部控制。
+2. Auto / Interact / Parallel Simulation 顶部控制。
 3. Robot 单选：UR5 / Franka。
 4. 图片上传和 webcam 输入。
 5. Task / Scene 双文本输入。

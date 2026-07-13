@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from random_input import IMAGE_DIR as AUTO_BASE_IMAGE_DIR
-from random_input import generate_auto_text_input
+from random_input import (
+    auto_image_directories,
+    available_auto_task_indices,
+    generate_auto_text_input,
+)
 
 PROXY_ENV_KEYS = (
     "HTTP_PROXY",
@@ -52,8 +56,11 @@ from PIL import Image, ImageDraw, ImageOps
 
 
 EMBODICHAIN_ROOT = Path(
-    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/EmbodiChain/")
+    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/workspace/sources/EmbodiChain")
 ).expanduser()
+APP_ROOT = Path(__file__).resolve().parent
+ASSETS_DIR = APP_ROOT / "assets"
+DEXFORCE_LOGO = ASSETS_DIR / "dexforce.png"
 SCENE_ID = "current"
 
 GYM_PROJECT_ROOT = EMBODICHAIN_ROOT / "gym_project"
@@ -88,13 +95,89 @@ TEXT_REWRITE_SUFFIXES = {
 }
 VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 LEROBOT_PREVIEW_DIR = OUTPUTS_DIR / "lerobot_previews"
+COMBINED_PREVIEW_DIR = OUTPUTS_DIR / "combined_previews"
 LEROBOT_PREVIEW_MAX_FRAMES = 360
+COMBINED_VIDEO_FPS = 25
 TOP_MODE_AUTO = "auto"
 TOP_MODE_INTERACT = "interact"
 TOP_MODE_PARALLEL_ENV = "parallel_env"
+LANGUAGE_EN = "en"
+LANGUAGE_ZH = "zh"
+BUTTON_LABELS = {
+    LANGUAGE_EN: {
+        "auto": "Auto",
+        "interact": "Interact",
+        "parallel_env": "Parallel Simulation",
+        "generate": "Generate",
+        "random_input": "Random Input",
+        "reset": "Reset",
+        "stop": "Stop",
+        "language": "中文",
+    },
+    LANGUAGE_ZH: {
+        "auto": "自动",
+        "interact": "交互",
+        "parallel_env": "并行仿真",
+        "generate": "生成",
+        "random_input": "随机填充",
+        "reset": "重置",
+        "stop": "停止",
+        "language": "English",
+    },
+}
+UI_TEXT = {
+    LANGUAGE_EN: {
+        "heading": "# Generative Simulation User Interface",
+        "instruction": (
+            "Upload one image, enter one task, then EmbodiChain "
+            "will generate what you want."
+        ),
+        "robot": "Robot",
+        "input_image": "Input image",
+        "task_description": "Task description",
+        "task_placeholder": "Put the middle bottle on the book",
+        "scene_description": "Scene description",
+        "scene_placeholder": "Optional: describe how to edit the current scene",
+        "scene_mode": "Generation mode",
+        "scene_mode_initial": "Initial generation",
+        "scene_mode_edit": "Edit current scene",
+        "scene_mode_task_only": "Change task only",
+        "single_video_preview": "LeRobot Data Preview",
+        "parallel_video_preview": "Parallel Env Data Preview",
+        "current_task": "Current task",
+        "progress": "Progress",
+        "initial_preview": "Initial scene preview",
+        "edited_preview": "Edited scene preview",
+        "object_preview": "Generated object GLBs preview",
+    },
+    LANGUAGE_ZH: {
+        "heading": "# 生成式仿真用户界面",
+        "instruction": "上传一张图片，输入一个任务，EmbodiChain 将生成所需的仿真。",
+        "robot": "机器人",
+        "input_image": "输入图像",
+        "task_description": "任务描述",
+        "task_placeholder": "把中间的水瓶放到书上",
+        "scene_description": "场景描述",
+        "scene_placeholder": "可选：描述如何编辑当前场景",
+        "scene_mode": "生成模式",
+        "scene_mode_initial": "初始生成",
+        "scene_mode_edit": "编辑当前场景",
+        "scene_mode_task_only": "仅修改任务",
+        "single_video_preview": "LeRobot 数据预览",
+        "parallel_video_preview": "并行环境数据预览",
+        "current_task": "当前任务",
+        "progress": "进度",
+        "initial_preview": "初始场景预览",
+        "edited_preview": "编辑后场景预览",
+        "object_preview": "生成对象 GLB 预览",
+    },
+}
 PIPELINE_MODE_INITIAL = "initial"
 PIPELINE_MODE_EDIT = "edit"
 PIPELINE_MODE_TASK_ONLY = "task_only"
+SCENE_MODE_INITIAL = "initial"
+SCENE_MODE_EDIT = "edit"
+SCENE_MODE_TASK_ONLY = "task_only"
 ROBOT_PROFILE_FRANKA = "Franka"
 ROBOT_PROFILE_UR5 = "UR5"
 RUN_LOG_MODE_AUTO = "auto"
@@ -216,6 +299,7 @@ class RuntimeState:
     auto_loop_active: bool = False
     auto_loop_token: str | None = None
     auto_round: int = 0
+    language: str = LANGUAGE_EN
     process: subprocess.Popen[str] | None = None
     sim_process: subprocess.Popen[str] | None = None
     sim_started: bool = False
@@ -403,7 +487,6 @@ def cleanup_auto_generated_artifacts(extra_image_path: Path | None = None) -> li
         runtime.image_path = None
         runtime.input_task_text = ""
         runtime.input_scene_text = ""
-        runtime.video_path = None
         runtime.lerobot_video_path = None
         runtime.lerobot_dataset_path = None
         runtime.object_model_path = None
@@ -696,6 +779,23 @@ def archive_audience_video(
     return copied_paths, errors
 
 
+def archived_audience_video_path(log_path: Path | None) -> Path | None:
+    """Return the audience-video copy created alongside an archived run log."""
+    if log_path is None:
+        return None
+    archive_dir = log_path.parent / "audience_video"
+    if not archive_dir.is_dir():
+        return None
+    videos = [
+        path
+        for path in archive_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
+    ]
+    if not videos:
+        return None
+    return max(videos, key=lambda path: path.stat().st_mtime_ns)
+
+
 def collect_output_videos() -> list[Path]:
     if not OUTPUTS_DIR.is_dir():
         return []
@@ -815,6 +915,8 @@ def latest_lerobot_dataset(min_mtime_ns: int | None = None) -> Path | None:
     latest_path: Path | None = None
     latest_mtime = -1
     for dataset_path in collect_lerobot_datasets():
+        if not lerobot_dataset_has_frames(dataset_path):
+            continue
         mtime = latest_lerobot_dataset_mtime_ns(dataset_path)
         if min_mtime_ns is not None and mtime < min_mtime_ns:
             continue
@@ -822,6 +924,11 @@ def latest_lerobot_dataset(min_mtime_ns: int | None = None) -> Path | None:
             latest_path = dataset_path
             latest_mtime = mtime
     return latest_path
+
+
+def lerobot_dataset_has_frames(dataset_path: Path) -> bool:
+    data_dir = dataset_path / "data"
+    return data_dir.is_dir() and any(data_dir.rglob("*.parquet"))
 
 
 def latest_lerobot_dataset_mtime_ns(dataset_path: Path) -> int:
@@ -891,6 +998,114 @@ def build_lerobot_preview_video(dataset_path: Path) -> Path | None:
         return None
 
     return output_path
+
+
+def video_duration_seconds(video_path: Path) -> float | None:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        duration = float(result.stdout.strip())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return duration if duration > 0 else None
+
+
+def build_single_env_combined_video(
+    audience_video: Path | None,
+    lerobot_video: Path | None,
+) -> Path | None:
+    """Create a synchronized side-by-side simulation and LeRobot video."""
+    if (
+        audience_video is None
+        or lerobot_video is None
+        or not audience_video.is_file()
+        or not lerobot_video.is_file()
+    ):
+        return None
+
+    audience_duration = video_duration_seconds(audience_video)
+    lerobot_duration = video_duration_seconds(lerobot_video)
+    if audience_duration is None or lerobot_duration is None:
+        return None
+
+    latest_source_mtime = max(
+        audience_video.stat().st_mtime_ns,
+        lerobot_video.stat().st_mtime_ns,
+    )
+    output_path = (
+        COMBINED_PREVIEW_DIR
+        / f"{safe_filename_part(audience_video.stem)}_with_lerobot.mp4"
+    )
+    if output_path.is_file() and output_path.stat().st_mtime_ns >= latest_source_mtime:
+        return output_path
+
+    lerobot_time_scale = audience_duration / lerobot_duration
+    filter_graph = (
+        f"[0:v]fps={COMBINED_VIDEO_FPS},scale=960:540:force_original_aspect_ratio=decrease,"
+        "pad=960:540:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
+        "setpts=PTS-STARTPTS[sim];"
+        f"[1:v]fps={COMBINED_VIDEO_FPS},scale=960:540:force_original_aspect_ratio=decrease,"
+        "pad=960:540:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,"
+        f"setpts=(PTS-STARTPTS)*{lerobot_time_scale:.9f}[data];"
+        "[sim][data]hstack=inputs=2:shortest=1,format=yuv420p[video]"
+    )
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(audience_video),
+        "-i",
+        str(lerobot_video),
+        "-filter_complex",
+        filter_graph,
+        "-map",
+        "[video]",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=180,
+        )
+        if result.returncode == 0 and output_path.is_file():
+            return output_path
+        with runtime_lock:
+            runtime.log_lines.append(
+                "Combined video skipped: "
+                + (result.stderr.strip().splitlines()[-1] if result.stderr else "ffmpeg failed")
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        with runtime_lock:
+            runtime.log_lines.append(f"Combined video skipped: {exc}")
+    return None
 
 
 def read_lerobot_fps(dataset_path: Path) -> int | None:
@@ -1113,14 +1328,16 @@ def build_run_agent_command(
         "--agent_config",
         str(paths.agent_config),
         "--regenerate",
+        "--renderer",
+        "fast-rt"
     ]
     if parallel_env:
         command.extend(
             [
                 "--num_envs",
-                "2",
+                "9",
                 "--arena_space",
-                "3",
+                "2.5",
                 "--filter_dataset_saving",
             ]
         )
@@ -1796,18 +2013,22 @@ def run_generate(
     env_text: str,
     *,
     force_initial: bool = False,
+    scene_mode: str = SCENE_MODE_INITIAL,
     parallel_env: bool = False,
     robot_profile: str | None = None,
     run_log_mode: str = RUN_LOG_MODE_INTERACT,
+    preserve_previous_video: bool = False,
 ):
     task_text = (task_text or "").strip()
     env_text = (env_text or "").strip()
-    if env_text and not force_initial:
+    if force_initial or scene_mode == SCENE_MODE_INITIAL:
+        mode = PIPELINE_MODE_INITIAL
+    elif scene_mode == SCENE_MODE_EDIT:
         mode = PIPELINE_MODE_EDIT
-    elif not force_initial and current_scene_available_for_task_only():
+    elif scene_mode == SCENE_MODE_TASK_ONLY:
         mode = PIPELINE_MODE_TASK_ONLY
     else:
-        mode = PIPELINE_MODE_INITIAL
+        raise ValueError(f"Unsupported scene mode: {scene_mode}")
     old_sim_process: subprocess.Popen[str] | None = None
     with runtime_lock:
         if runtime.is_busy:
@@ -1839,6 +2060,8 @@ def run_generate(
         if mode == PIPELINE_MODE_EDIT:
             if not task_text:
                 raise ValueError("Please enter a task description.")
+            if not env_text:
+                raise ValueError("Please enter a scene description to edit.")
             initial_scene_path = prepare_current_scene_for_edit()
             image_path = IMAGE_PATH if IMAGE_PATH.is_file() else None
         elif mode == PIPELINE_MODE_TASK_ONLY:
@@ -1898,7 +2121,8 @@ def run_generate(
         runtime.input_task_text = task_text
         runtime.input_scene_text = env_text
         runtime.image_path = image_path
-        runtime.video_path = None
+        if not preserve_previous_video:
+            runtime.video_path = None
         runtime.lerobot_video_path = None
         runtime.lerobot_dataset_path = None
         runtime.object_model_path = existing_object_preview_path
@@ -1984,6 +2208,21 @@ def start_auto_loop_state() -> str | None:
     with runtime_lock:
         if runtime.auto_loop_active or runtime.is_busy:
             runtime.status = "A pipeline run is already in progress."
+            return None
+
+        available_tasks = available_auto_task_indices()
+        if not available_tasks:
+            image_dirs = ", ".join(str(path) for path in auto_image_directories())
+            message = (
+                "Auto cannot start: no task input images were found. "
+                "Add task0_0.png through task4_3.png to one of: "
+                f"{image_dirs}"
+            )
+            runtime.phase_key = "failed"
+            runtime.status = message
+            runtime.last_error = message
+            runtime.log_lines.clear()
+            runtime.log_lines.append(message)
             return None
 
         token = uuid.uuid4().hex
@@ -2094,10 +2333,12 @@ def wait_for_current_simulation_to_exit(
 def run_generate_for_top_mode(
     run_mode: str,
     action_mode: str | None,
+    scene_mode: str,
     robot_profile: str | None,
     image_value: str | np.ndarray | Image.Image,
     task_text: str,
     env_text: str,
+    language: str | None,
 ):
     parallel_env = action_mode == TOP_MODE_PARALLEL_ENV
     if run_mode != TOP_MODE_AUTO:
@@ -2106,6 +2347,7 @@ def run_generate_for_top_mode(
             task_text,
             env_text,
             force_initial=False,
+            scene_mode=scene_mode,
             parallel_env=parallel_env,
             robot_profile=robot_profile,
             run_log_mode=RUN_LOG_MODE_INTERACT,
@@ -2117,6 +2359,9 @@ def run_generate_for_top_mode(
     if loop_token is None:
         yield (gr.update(), gr.update(), gr.update(), *ui_snapshot())
         return
+
+    with runtime_lock:
+        runtime.language = language or LANGUAGE_EN
 
     while auto_loop_is_active(loop_token):
         auto_task = ""
@@ -2142,7 +2387,9 @@ def run_generate_for_top_mode(
             break
 
         try:
-            auto_input = generate_auto_text_input()
+            with runtime_lock:
+                selected_language = runtime.language
+            auto_input = generate_auto_text_input(language=selected_language)
         except Exception as exc:
             if not auto_loop_is_active(loop_token):
                 break
@@ -2169,7 +2416,6 @@ def run_generate_for_top_mode(
             runtime.input_task_text = auto_task
             runtime.input_scene_text = auto_scene
             runtime.image_path = auto_input.base_image_path
-            runtime.video_path = None
             runtime.lerobot_video_path = None
             runtime.lerobot_dataset_path = None
             runtime.phase_key = "received"
@@ -2204,9 +2450,11 @@ def run_generate_for_top_mode(
             auto_task,
             auto_scene,
             force_initial=True,
+            scene_mode=SCENE_MODE_INITIAL,
             parallel_env=parallel_env,
             robot_profile=robot_profile,
             run_log_mode=RUN_LOG_MODE_AUTO,
+            preserve_previous_video=True,
         ):
             yield (base_image, auto_task, auto_scene, *snapshot)
             if not auto_loop_is_active(loop_token):
@@ -2264,11 +2512,21 @@ def run_generate_for_top_mode(
                 and runtime.sim_process is None
             )
             round_outcome = "completed" if simulation_completed else "simulation_failed"
-        archive_run_log(
+        log_path = archive_run_log(
             mode=RUN_LOG_MODE_AUTO,
             task_description=auto_task,
             scene_description=auto_scene,
             outcome=round_outcome,
+        )
+        archived_video = archived_audience_video_path(log_path)
+        if archived_video is not None:
+            with runtime_lock:
+                runtime.video_path = archived_video
+        yield (
+            base_image,
+            auto_task,
+            auto_scene,
+            *ui_snapshot(extra_status="Auto video archived and ready to play."),
         )
         cleanup_errors = cleanup_auto_generated_artifacts()
         if cleanup_errors:
@@ -2675,6 +2933,7 @@ def launch_current_simulation(
             run_log_mode,
             task_description,
             scene_description,
+            parallel_env,
         ),
         daemon=True,
     )
@@ -2708,6 +2967,7 @@ def monitor_simulation(
     run_log_mode: str,
     task_description: str,
     scene_description: str,
+    parallel_env: bool,
 ) -> None:
     while process.poll() is None:
         append_simulation_logs(token, process, drain_output_queue(output_queue))
@@ -2722,6 +2982,12 @@ def monitor_simulation(
         if latest_dataset is not None
         else None
     )
+    combined_video = (
+        build_single_env_combined_video(latest_video, lerobot_video)
+        if not parallel_env
+        else None
+    )
+    display_video = combined_video or latest_video
 
     should_archive = False
     archive_outcome = "completed"
@@ -2731,18 +2997,24 @@ def monitor_simulation(
         runtime.sim_process = None
         runtime.sim_finished = True
         runtime.sim_returncode = process.returncode
-        runtime.video_path = latest_video
+        runtime.video_path = display_video
         runtime.lerobot_dataset_path = latest_dataset
-        runtime.lerobot_video_path = lerobot_video
+        runtime.lerobot_video_path = None if combined_video is not None else lerobot_video
         if process.returncode == 0:
             runtime.status = "Pipeline completed successfully.\nDexsim simulation finished."
             if latest_video is None:
                 runtime.log_lines.append("Audience video not found in outputs.")
             if latest_dataset is None:
-                runtime.log_lines.append("LeRobot dataset not found.")
+                runtime.log_lines.append(
+                    "LeRobot dataset with recorded frames not found."
+                )
             elif lerobot_video is None:
                 runtime.log_lines.append(
                     f"LeRobot dataset found, but preview was not generated: {latest_dataset}"
+                )
+            elif combined_video is not None:
+                runtime.log_lines.append(
+                    f"Single-env combined video created: {combined_video}"
                 )
         else:
             runtime.status = (
@@ -2760,7 +3032,7 @@ def monitor_simulation(
             task_description=task_description,
             scene_description=scene_description,
             outcome=archive_outcome,
-            audience_video=latest_video,
+            audience_video=display_video,
         )
 
 
@@ -2799,7 +3071,6 @@ def run_reset():
         None,
         "",
         "",
-        None,
         None,
         "",
         PHASES["idle"].progress,
@@ -2851,7 +3122,6 @@ def stop_current_run_without_cleanup():
         "",
         "",
         None,
-        None,
         "",
         PHASES["idle"].progress,
         format_status("Stopped."),
@@ -2867,11 +3137,127 @@ def run_reset_or_stop(run_mode: str):
     return run_reset()
 
 
+def randomize_interact_input(run_mode: str | None, language: str | None):
+    """Fill the Interact form with one available template scene and task."""
+    if run_mode != TOP_MODE_INTERACT:
+        return gr.update(), gr.update(), gr.update(), gr.update()
+    auto_input = generate_auto_text_input(language=language or LANGUAGE_EN)
+    return (
+        auto_input.base_image_path.as_posix(),
+        auto_input.task_description,
+        auto_input.scene_description,
+        SCENE_MODE_INITIAL,
+    )
+
+
+def button_updates(
+    language: str | None,
+    run_mode: str | None,
+    action_mode: str | None,
+) -> tuple[Any, Any, Any, Any, Any, Any]:
+    """Build localized labels while preserving the selected button variants."""
+    labels = BUTTON_LABELS.get(language or LANGUAGE_EN, BUTTON_LABELS[LANGUAGE_EN])
+    is_auto = run_mode == TOP_MODE_AUTO
+    is_interact = run_mode != TOP_MODE_AUTO
+    is_parallel_env = action_mode == TOP_MODE_PARALLEL_ENV
+    return (
+        gr.update(
+            value=labels["auto"],
+            variant="primary" if is_auto else "secondary",
+        ),
+        gr.update(
+            value=labels["interact"],
+            variant="primary" if is_interact else "secondary",
+        ),
+        gr.update(
+            value=labels["parallel_env"],
+            variant="primary" if is_parallel_env else "secondary",
+        ),
+        gr.update(value=labels["generate"]),
+        gr.update(value=labels["random_input"], visible=is_interact),
+        gr.update(value=labels["stop"] if is_auto else labels["reset"]),
+    )
+
+
+def video_preview_label(language: str | None, action_mode: str | None) -> str:
+    text = UI_TEXT.get(language or LANGUAGE_EN, UI_TEXT[LANGUAGE_EN])
+    key = (
+        "parallel_video_preview"
+        if action_mode == TOP_MODE_PARALLEL_ENV
+        else "single_video_preview"
+    )
+    return text[key]
+
+
+def scene_mode_choices(language: str | None) -> list[tuple[str, str]]:
+    text = UI_TEXT.get(language or LANGUAGE_EN, UI_TEXT[LANGUAGE_EN])
+    return [
+        (text["scene_mode_initial"], SCENE_MODE_INITIAL),
+        (text["scene_mode_edit"], SCENE_MODE_EDIT),
+        (text["scene_mode_task_only"], SCENE_MODE_TASK_ONLY),
+    ]
+
+
+def localized_ui_updates(
+    language: str | None,
+    action_mode: str | None,
+) -> tuple[Any, ...]:
+    """Return updates for every non-button, user-facing static UI string."""
+    text = UI_TEXT.get(language or LANGUAGE_EN, UI_TEXT[LANGUAGE_EN])
+    instruction_html = (
+        "<div style='font-size: 20px; font-weight: 700; "
+        "line-height: 1.35; min-height: 86px; display: flex; "
+        f"align-items: center;'>{text['instruction']}</div>"
+    )
+    return (
+        gr.update(value=text["heading"]),
+        gr.update(value=instruction_html),
+        gr.update(label=text["robot"]),
+        gr.update(label=text["input_image"]),
+        gr.update(
+            label=text["task_description"],
+            placeholder=text["task_placeholder"],
+        ),
+        gr.update(
+            label=text["scene_description"],
+            placeholder=text["scene_placeholder"],
+        ),
+        gr.update(
+            label=text["scene_mode"],
+            choices=scene_mode_choices(language),
+        ),
+        gr.update(label=video_preview_label(language, action_mode)),
+        gr.update(label=text["current_task"]),
+        gr.update(label=text["progress"]),
+        gr.update(label=text["initial_preview"]),
+        gr.update(label=text["edited_preview"]),
+        gr.update(label=text["object_preview"]),
+    )
+
+
+def toggle_language(
+    language: str | None,
+    run_mode: str | None,
+    action_mode: str | None,
+):
+    next_language = LANGUAGE_ZH if language != LANGUAGE_ZH else LANGUAGE_EN
+    with runtime_lock:
+        runtime.language = next_language
+    labels = BUTTON_LABELS[next_language]
+    return (
+        *button_updates(next_language, run_mode, action_mode),
+        gr.update(value=labels["language"]),
+        *localized_ui_updates(next_language, action_mode),
+        next_language,
+    )
+
+
 def select_top_mode(
     selected_run_mode: str | None,
     selected_action_mode: str | None,
     current_run_mode: str,
     current_action_mode: str | None,
+    language: str | None,
 ):
     run_mode = selected_run_mode or current_run_mode or TOP_MODE_INTERACT
     action_mode = current_action_mode
@@ -2889,14 +3275,9 @@ def select_top_mode(
         or run_mode != TOP_MODE_AUTO
     ):
         stop_auto_loop_if_running()
-    is_auto = run_mode == TOP_MODE_AUTO
-    is_interact = run_mode == TOP_MODE_INTERACT
-    is_parallel_env = action_mode == TOP_MODE_PARALLEL_ENV
     return (
-        gr.update(variant="primary" if is_auto else "secondary"),
-        gr.update(variant="primary" if is_interact else "secondary"),
-        gr.update(variant="primary" if is_parallel_env else "secondary"),
-        gr.update(value="Stop" if is_auto else "Reset"),
+        *button_updates(language, run_mode, action_mode),
+        gr.update(label=video_preview_label(language, action_mode)),
         run_mode,
         action_mode,
     )
@@ -2908,11 +3289,6 @@ def ui_snapshot(extra_status: str | None = None):
         video_value = (
             runtime.video_path.as_posix()
             if runtime.video_path and runtime.video_path.is_file()
-            else None
-        )
-        lerobot_video_value = (
-            runtime.lerobot_video_path.as_posix()
-            if runtime.lerobot_video_path and runtime.lerobot_video_path.is_file()
             else None
         )
         object_model_value = (
@@ -2939,7 +3315,6 @@ def ui_snapshot(extra_status: str | None = None):
         last_error = runtime.last_error
     return (
         video_value,
-        lerobot_video_value,
         task_text,
         phase.progress,
         format_status(
@@ -2998,17 +3373,28 @@ def format_status(
 
 
 def build_demo() -> gr.Blocks:
-    with gr.Blocks(title="EmbodiChain Gradio", js=VIDEO_SYNC_JS) as demo:
+    with gr.Blocks(title="EmbodiChain Gradio") as demo:
         run_mode = gr.State(TOP_MODE_INTERACT)
         action_mode = gr.State(None)
+        language = gr.State(LANGUAGE_EN)
+        with gr.Row(equal_height=True):
+            if DEXFORCE_LOGO.is_file():
+                gr.Image(
+                    value=str(DEXFORCE_LOGO),
+                    show_label=False,
+                    container=False,
+                    height=58,
+                    width=183,
+                )
+            heading = gr.Markdown(UI_TEXT[LANGUAGE_EN]["heading"])
         with gr.Row():
-            gr.Markdown("# Generative Simulation User Interface")
             auto_button = gr.Button("Auto", variant="secondary")
             interact_button = gr.Button("Interact", variant="primary")
-            parallel_env_button = gr.Button("Parallel Env", variant="secondary")
+            parallel_env_button = gr.Button("Parallel Simulation", variant="secondary")
+            language_button = gr.Button("中文", variant="secondary")
         with gr.Row():
             with gr.Column(scale=4):
-                gr.HTML(
+                instruction = gr.HTML(
                     "<div style='font-size: 20px; font-weight: 700; "
                     "line-height: 1.35; min-height: 86px; display: flex; "
                     "align-items: center;'>"
@@ -3020,13 +3406,13 @@ def build_demo() -> gr.Blocks:
                 robot_profile = gr.Radio(
                     choices=[ROBOT_PROFILE_FRANKA, ROBOT_PROFILE_UR5],
                     value=ROBOT_PROFILE_UR5,
-                    label="Robot",
+                    label=UI_TEXT[LANGUAGE_EN]["robot"],
                 )
 
         with gr.Row():
             with gr.Column(scale=1):
                 image_input = gr.Image(
-                    label="Input image",
+                    label=UI_TEXT[LANGUAGE_EN]["input_image"],
                     sources=["upload", "webcam"],
                     type="filepath",
                     format="png",
@@ -3034,32 +3420,32 @@ def build_demo() -> gr.Blocks:
                 )
                 with gr.Row():
                     task_input = gr.Textbox(
-                        label="Task description",
-                        placeholder="把中间的水瓶放到书上",
+                        label=UI_TEXT[LANGUAGE_EN]["task_description"],
+                        placeholder=UI_TEXT[LANGUAGE_EN]["task_placeholder"],
                         lines=1,
                     )
                     env_input = gr.Textbox(
-                        label="Scene description",
-                        placeholder="",
+                        label=UI_TEXT[LANGUAGE_EN]["scene_description"],
+                        placeholder=UI_TEXT[LANGUAGE_EN]["scene_placeholder"],
                         lines=1,
                     )
+                scene_mode = gr.Radio(
+                    choices=scene_mode_choices(LANGUAGE_EN),
+                    value=SCENE_MODE_INITIAL,
+                    label=UI_TEXT[LANGUAGE_EN]["scene_mode"],
+                )
                 with gr.Row():
                     generate_button = gr.Button("Generate", variant="primary")
+                    random_input_button = gr.Button("Random Input")
                     reset_button = gr.Button("Reset", variant="stop")
             with gr.Column(scale=2):
-                with gr.Row():
-                    current_image = gr.Video(
-                        label="Current saved video",
-                        height=320,
-                        elem_id="embodichain-audience-video",
-                    )
-                    lerobot_preview = gr.Video(
-                        label="LeRobot data preview",
-                        height=320,
-                        elem_id="embodichain-lerobot-video",
-                    )
+                current_image = gr.Video(
+                    label=UI_TEXT[LANGUAGE_EN]["single_video_preview"],
+                    height=420,
+                    elem_id="embodichain-video-preview",
+                )
                 current_task = gr.Textbox(
-                    label="Current task",
+                    label=UI_TEXT[LANGUAGE_EN]["current_task"],
                     interactive=False,
                     lines=2,
                 )
@@ -3069,23 +3455,23 @@ def build_demo() -> gr.Blocks:
             maximum=100,
             value=0,
             step=1,
-            label="Progress",
+            label=UI_TEXT[LANGUAGE_EN]["progress"],
             interactive=False,
         )
         status = gr.Markdown(format_status("Idle."))
         with gr.Row():
             model = gr.Model3D(
-                label="Initial scene preview",
+                label=UI_TEXT[LANGUAGE_EN]["initial_preview"],
                 height=520,
                 clear_color=(0.94, 0.94, 0.94, 1.0),
             )
             edited_model = gr.Model3D(
-                label="Edited scene preview",
+                label=UI_TEXT[LANGUAGE_EN]["edited_preview"],
                 height=520,
                 clear_color=(0.94, 0.94, 0.94, 1.0),
             )
         object_model = gr.Model3D(
-            label="Generated object GLBs preview",
+            label=UI_TEXT[LANGUAGE_EN]["object_preview"],
             height=360,
             clear_color=(0.94, 0.94, 0.94, 1.0),
         )
@@ -3095,7 +3481,10 @@ def build_demo() -> gr.Blocks:
             auto_button,
             interact_button,
             parallel_env_button,
+            generate_button,
+            random_input_button,
             reset_button,
+            current_image,
             run_mode,
             action_mode,
         ]
@@ -3106,6 +3495,7 @@ def build_demo() -> gr.Blocks:
                 gr.State(None),
                 run_mode,
                 action_mode,
+                language,
             ],
             outputs=top_mode_outputs,
             queue=False,
@@ -3117,6 +3507,7 @@ def build_demo() -> gr.Blocks:
                 gr.State(None),
                 run_mode,
                 action_mode,
+                language,
             ],
             outputs=top_mode_outputs,
             queue=False,
@@ -3128,8 +3519,37 @@ def build_demo() -> gr.Blocks:
                 gr.State(TOP_MODE_PARALLEL_ENV),
                 run_mode,
                 action_mode,
+                language,
             ],
             outputs=top_mode_outputs,
+            queue=False,
+        )
+        language_button.click(
+            toggle_language,
+            inputs=[language, run_mode, action_mode],
+            outputs=[
+                auto_button,
+                interact_button,
+                parallel_env_button,
+                generate_button,
+                random_input_button,
+                reset_button,
+                language_button,
+                heading,
+                instruction,
+                robot_profile,
+                image_input,
+                task_input,
+                env_input,
+                scene_mode,
+                current_image,
+                current_task,
+                progress,
+                model,
+                edited_model,
+                object_model,
+                language,
+            ],
             queue=False,
         )
         generate_button.click(
@@ -3137,17 +3557,18 @@ def build_demo() -> gr.Blocks:
             inputs=[
                 run_mode,
                 action_mode,
+                scene_mode,
                 robot_profile,
                 image_input,
                 task_input,
                 env_input,
+                language,
             ],
             outputs=[
                 image_input,
                 task_input,
                 env_input,
                 current_image,
-                lerobot_preview,
                 current_task,
                 progress,
                 status,
@@ -3155,6 +3576,12 @@ def build_demo() -> gr.Blocks:
                 edited_model,
                 object_model,
             ],
+        )
+        random_input_button.click(
+            randomize_interact_input,
+            inputs=[run_mode, language],
+            outputs=[image_input, task_input, env_input, scene_mode],
+            queue=False,
         )
         reset_button.click(
             run_reset_or_stop,
@@ -3164,7 +3591,6 @@ def build_demo() -> gr.Blocks:
                 task_input,
                 env_input,
                 current_image,
-                lerobot_preview,
                 current_task,
                 progress,
                 status,
@@ -3182,7 +3608,6 @@ def build_demo() -> gr.Blocks:
                 task_input,
                 env_input,
                 current_image,
-                lerobot_preview,
                 current_task,
                 progress,
                 status,
@@ -3203,7 +3628,7 @@ def main() -> None:
     demo.launch(
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
-        allowed_paths=[str(EMBODICHAIN_ROOT)],
+        allowed_paths=[str(EMBODICHAIN_ROOT), str(ASSETS_DIR)],
     )
 
 
