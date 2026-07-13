@@ -186,11 +186,11 @@ AUTO_IMAGE_DIR 显式设置时：
   <AUTO_IMAGE_DIR>
 
 AUTO_IMAGE_DIR 未设置时，按顺序查找：
-  <EMBODICHAIN_ROOT>/gym_project/action_agent_pipesline/auto_images
+  <EMBODICHAIN_ROOT>/gym_project/action_agent_pipeline/auto_images
   <EMBODICHAIN_ROOT>/gym_project/action_agent_pipeline/baseline_image_input
 ```
 
-注意第一个默认路径在代码中是 `action_agent_pipesline`，不是 `action_agent_pipeline`。
+注意第一个默认路径在代码中是 `action_agent_pipeline`，不是 `action_agent_pipeline`。
 
 任务索引范围：
 
@@ -563,7 +563,7 @@ Auto 使用 `cleanup_auto_generated_artifacts()`，清理目标和 Reset 基本�
 
 ```text
 AUTO_IMAGE_DIR（如设置）
-否则 <EMBODICHAIN_ROOT>/gym_project/action_agent_pipesline/auto_images
+否则 <EMBODICHAIN_ROOT>/gym_project/action_agent_pipeline/auto_images
 ```
 
 因此 Auto 只保护这个目录下的预置图片；回退目录 `baseline_image_input` 不是保护目录，但它通常不在 Auto 清理目标列表中。
@@ -718,5 +718,5 @@ UI 会展示：
 2. 仅修改任务模式可能部分覆盖 current config。
 3. Reset 只能终止本地 subprocess，不能取消远端服务已接收的请求。
 4. `outputs` 清理会保留视频文件。
-5. Auto 只保护 `random_input.IMAGE_DIR`，且代码里的默认 auto_images 路径拼写为 `action_agent_pipesline`。
+5. Auto 只保护 `random_input.IMAGE_DIR`，且代码里的默认 auto_images 路径拼写为 `action_agent_pipeline`。
 6. Auto 不调用图片生成 API；`random_input.py` 中的 Ark/Doubao 图片生成函数目前不是 Gradio 路径的一部分。

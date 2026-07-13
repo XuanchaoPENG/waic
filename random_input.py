@@ -16,7 +16,7 @@ EMBODICHAIN_ROOT = Path(
 IMAGE_DIR = Path(
     os.environ.get(
         "AUTO_IMAGE_DIR",
-        str(EMBODICHAIN_ROOT / "gym_project/action_agent_pipesline/auto_images"),
+        str(EMBODICHAIN_ROOT / "gym_project/action_agent_pipeline/auto_images"),
     )
 ).expanduser()
 AUTO_IMAGE_DIR_IS_CONFIGURED = "AUTO_IMAGE_DIR" in os.environ
