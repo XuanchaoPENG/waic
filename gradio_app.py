@@ -3199,8 +3199,8 @@ def randomize_interact_input(run_mode: str | None, language: str | None):
     auto_input = generate_auto_text_input(language=language or LANGUAGE_EN)
     return (
         auto_input.base_image_path.as_posix(),
-        auto_input.task_description,
-        auto_input.scene_description,
+        gr.update(value=auto_input.task_description, interactive=True),
+        gr.update(value=auto_input.scene_description, interactive=True),
         SCENE_MODE_INITIAL,
     )
 
@@ -3251,6 +3251,16 @@ def scene_mode_choices(language: str | None) -> list[tuple[str, str]]:
         (text["scene_mode_edit"], SCENE_MODE_EDIT),
         (text["scene_mode_task_only"], SCENE_MODE_TASK_ONLY),
     ]
+
+
+def scene_mode_input_updates(scene_mode: str | None) -> tuple[Any, Any]:
+    """Set field availability for the selected scene operation."""
+    is_edit = scene_mode == SCENE_MODE_EDIT
+    is_task_only = scene_mode == SCENE_MODE_TASK_ONLY
+    return (
+        gr.update(interactive=not is_edit),
+        gr.update(interactive=not is_task_only),
+    )
 
 
 def localized_ui_updates(
@@ -3691,6 +3701,12 @@ def build_demo() -> gr.Blocks:
             randomize_interact_input,
             inputs=[run_mode, language],
             outputs=[image_input, task_input, env_input, scene_mode],
+            queue=False,
+        )
+        scene_mode.change(
+            scene_mode_input_updates,
+            inputs=[scene_mode],
+            outputs=[task_input, env_input],
             queue=False,
         )
         reset_button.click(
