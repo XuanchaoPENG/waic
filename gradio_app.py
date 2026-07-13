@@ -325,6 +325,7 @@ class RuntimeState:
     previous_auto_image_path: Path | None = None
     previous_auto_task_text: str = ""
     previous_auto_video_path: Path | None = None
+    submitted_input_revision: int = 0
     object_model_path: Path | None = None
     scene_model_path: Path | None = None
     edited_scene_model_path: Path | None = None
@@ -2135,6 +2136,7 @@ def run_generate(
         runtime.input_task_text = task_text
         runtime.input_scene_text = env_text
         runtime.image_path = image_path
+        runtime.submitted_input_revision += 1
         if not preserve_previous_video:
             runtime.video_path = None
         runtime.lerobot_video_path = None
@@ -3418,10 +3420,18 @@ def auto_history_snapshot() -> tuple[str | None, str, str | None]:
     return image_value, task_value, video_value
 
 
-def synced_ui_snapshot(run_mode: str | None = None):
+def synced_ui_snapshot(
+    run_mode: str | None = None,
+    last_seen_input_revision: int | None = None,
+):
     sync_inputs = False
     with runtime_lock:
-        sync_inputs = runtime.auto_loop_active or run_mode == TOP_MODE_AUTO
+        submitted_input_revision = runtime.submitted_input_revision
+        sync_inputs = (
+            runtime.auto_loop_active
+            or run_mode == TOP_MODE_AUTO
+            or submitted_input_revision != (last_seen_input_revision or 0)
+        )
         image_value = (
             runtime.image_path.as_posix()
             if runtime.image_path and runtime.image_path.is_file()
@@ -3434,7 +3444,12 @@ def synced_ui_snapshot(run_mode: str | None = None):
         input_values = (image_value, input_task_text, input_scene_text)
     else:
         input_values = (gr.update(), gr.update(), gr.update())
-    return (*input_values, *ui_snapshot(), *auto_history_snapshot())
+    return (
+        *input_values,
+        *ui_snapshot(),
+        *auto_history_snapshot(),
+        submitted_input_revision,
+    )
 
 
 def format_status(
@@ -3466,6 +3481,7 @@ def build_demo() -> gr.Blocks:
         run_mode = gr.State(TOP_MODE_INTERACT)
         action_mode = gr.State(None)
         language = gr.State(LANGUAGE_EN)
+        last_seen_input_revision = gr.State(0)
         with gr.Row(equal_height=True):
             if DEXFORCE_LOGO.is_file():
                 gr.Image(
@@ -3735,7 +3751,7 @@ def build_demo() -> gr.Blocks:
         )
         refresh_timer.tick(
             synced_ui_snapshot,
-            inputs=[run_mode],
+            inputs=[run_mode, last_seen_input_revision],
             outputs=[
                 image_input,
                 task_input,
@@ -3750,6 +3766,7 @@ def build_demo() -> gr.Blocks:
                 previous_auto_image,
                 previous_auto_task,
                 previous_auto_video,
+                last_seen_input_revision,
             ],
             queue=False,
         )
