@@ -124,9 +124,9 @@ RELATION_PATTERN = {
 AREA_PATTERN = [
     "at the left side of the table",
     "at the right side of the table",
-    "at the back of the table",
-    "at the back right corner of the table",
-    "at the back left corner of the table",
+    "at the front of the table",
+    "at the front right corner of the table",
+    "at the front left corner of the table",
 ]
 
 OBJECT_LIST = [
@@ -201,9 +201,9 @@ CHINESE_SPATIAL_RELATIONS = {
     "at the right side of the soda can": "易拉罐右侧",
     "at the left side of the table": "桌子左侧",
     "at the right side of the table": "桌子右侧",
-    "at the back of the table": "桌子后侧",
-    "at the back right corner of the table": "桌子右后角",
-    "at the back left corner of the table": "桌子左后角",
+    "at the front of the table": "桌子前侧",
+    "at the front right corner of the table": "桌子右前角",
+    "at the front left corner of the table": "桌子左前角",
     "on the table": "桌面上",
 }
 
