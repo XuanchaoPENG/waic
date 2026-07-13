@@ -3532,6 +3532,8 @@ def build_demo() -> gr.Blocks:
                     label=UI_TEXT[LANGUAGE_EN]["single_video_preview"],
                     height=420,
                     elem_id="embodichain-video-preview",
+                    autoplay=True,
+                    loop=True,
                 )
                 current_task = gr.Textbox(
                     label=UI_TEXT[LANGUAGE_EN]["current_task"],
@@ -3560,6 +3562,8 @@ def build_demo() -> gr.Blocks:
                     previous_auto_video = gr.Video(
                         label=UI_TEXT[LANGUAGE_EN]["previous_auto_video"],
                         height=320,
+                        autoplay=True,
+                        loop=True,
                     )
 
         progress = gr.Slider(
