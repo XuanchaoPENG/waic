@@ -165,27 +165,25 @@ CHINESE_OBJECT_NAMES = {
     "potted plant": "盆栽",
     "clock": "时钟",
     "book": "书",
-    "pen": "笔",
     "bottle": "瓶子",
     "soda can": "易拉罐",
     "photo frame": "相框",
     "apple": "苹果",
     "peach": "桃子",
-    "bread": "面包",
+    "bread": "小面包",
     "chocolate bar": "巧克力棒",
     "cookie": "饼干",
     "penholder": "笔筒",
-    "desk lamp": "台灯",
+    "desk lamp": "小台灯",
     "stapler": "订书机",
     "headphones": "耳机",
-    "desk calendar": "台历",
+    "small desk calendar": "小台历",
     "eyeglasses": "眼镜",
-    "fan": "风扇",
+    "fan": "小风扇",
     "bluetooth speaker": "蓝牙音箱",
-    "table mirror": "桌面镜子",
     "computer mouse": "鼠标",
-    "keyboard": "键盘",
 }
+
 
 CHINESE_SPATIAL_RELATIONS = {
     "at the left side of the can": "罐头左侧",
@@ -377,9 +375,9 @@ def create_text_input(
     if task_index[0] == 5:
         return ""
 
-    mu, sigma = 2.0, 1.0
+    mu, sigma = 1.0, 1.0
     raw = rng.normal(loc=mu, scale=sigma)
-    num_background_objects = int(np.clip(np.round(raw), 0, 5))
+    num_background_objects = int(np.clip(np.round(raw), 0, 3))
 
     if num_background_objects == 0:
         return ""
