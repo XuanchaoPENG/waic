@@ -22,6 +22,8 @@ from random_input import (
     auto_image_directories,
     available_auto_task_indices,
     generate_auto_text_input,
+    get_prebuilt_scene_dir,
+    parse_task_id,
 )
 
 PROXY_ENV_KEYS = (
@@ -61,6 +63,7 @@ EMBODICHAIN_ROOT = Path(
 APP_ROOT = Path(__file__).resolve().parent
 ASSETS_DIR = APP_ROOT / "assets"
 DEXFORCE_LOGO = ASSETS_DIR / "dexforce.png"
+INTERACT_RANDOM_PREVIEW_DIR = APP_ROOT / ".gradio_previews"
 SCENE_ID = "current"
 
 GYM_PROJECT_ROOT = EMBODICHAIN_ROOT / "gym_project"
@@ -615,17 +618,31 @@ def build_edit_pipeline_command(
     env_text: str,
     robot_profile: str | None = None,
 ) -> list[str]:
+    return build_scene_edit_pipeline_command(
+        task_text,
+        env_text,
+        CURRENT_PATHS,
+        robot_profile,
+    )
+
+
+def build_scene_edit_pipeline_command(
+    task_text: str,
+    env_text: str,
+    paths: ScenePaths,
+    robot_profile: str | None = None,
+) -> list[str]:
     command = [
         sys.executable,
         "-m",
         "embodichain.gen_sim.action_agent_pipeline.cli.run_agent_pipeline",
         "--use-prompt2scene",
         "--prompt2scene-output-root",
-        "gym_project/current",
+        f"gym_project/{paths.scene_id}",
         "--prompt2scene-prompt",
         env_text,
         "--config-output-dir",
-        "gym_project/action_agent_pipeline/configs/current",
+        f"gym_project/action_agent_pipeline/configs/{paths.scene_id}",
         "--task_name",
         SCENE_ID,
         "--task_description",
@@ -644,14 +661,22 @@ def build_task_only_config_command(
     task_text: str,
     robot_profile: str | None = None,
 ) -> list[str]:
+    return build_config_command_for_paths(task_text, CURRENT_PATHS, robot_profile)
+
+
+def build_config_command_for_paths(
+    task_text: str,
+    paths: ScenePaths,
+    robot_profile: str | None = None,
+) -> list[str]:
     command = [
         sys.executable,
         "-m",
         "embodichain.gen_sim.action_agent_pipeline.cli.generate_action_agent_config",
         "--gym_project",
-        "gym_project/current/gym_export",
+        f"gym_project/{paths.scene_id}/gym_export",
         "--output_dir",
-        "gym_project/action_agent_pipeline/configs/current",
+        f"gym_project/action_agent_pipeline/configs/{paths.scene_id}",
         "--task_name",
         SCENE_ID,
         "--task_description",
@@ -2018,6 +2043,67 @@ def prepare_current_scene_for_edit() -> Path:
     return initial_scene_path
 
 
+def prebuilt_scene_dir_for_image_value(
+    image_value: str | np.ndarray | Image.Image,
+) -> Path | None:
+    if not isinstance(image_value, str):
+        return None
+    image_path = Path(image_value).expanduser()
+    task_index = parse_task_id(image_path.name)
+    if task_index is None:
+        return None
+
+    try:
+        resolved_image = image_path.resolve()
+    except FileNotFoundError:
+        return None
+    filename = image_path.name
+    matches_auto_image = False
+    for image_dir in auto_image_directories():
+        candidate = image_dir / filename
+        if not candidate.is_file():
+            continue
+        try:
+            if candidate.resolve() == resolved_image:
+                matches_auto_image = True
+                break
+        except FileNotFoundError:
+            continue
+    if not matches_auto_image:
+        return None
+
+    scene_dir = get_prebuilt_scene_dir(task_index)
+    return scene_dir if scene_dir.is_dir() else None
+
+
+def copy_prebuilt_scene_to_stage(prebuilt_scene_dir: Path, stage: ScenePaths) -> None:
+    required_paths = [
+        prebuilt_scene_dir / "gym_export" / "gym_config.json",
+        prebuilt_scene_dir / "gym_export" / "scene_state" / "result.json",
+        prebuilt_scene_dir / "gym_export" / "scene_state" / "unified_scene.json",
+        prebuilt_scene_dir / "gym_export" / "scene_state" / "unified_scene_gen.json",
+    ]
+    missing = [path for path in required_paths if not path.is_file()]
+    if missing:
+        missing_text = ", ".join(str(path) for path in missing)
+        raise FileNotFoundError(f"Prebuilt scene is incomplete: {missing_text}")
+
+    cleanup_errors = []
+    cleanup_errors.extend(remove_path(stage.prompt_root))
+    cleanup_errors.extend(remove_path(stage.config_dir))
+    if cleanup_errors:
+        raise RuntimeError("\n".join(cleanup_errors))
+    stage.prompt_root.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(prebuilt_scene_dir, stage.prompt_root)
+
+
+def build_interact_random_initial_preview(prebuilt_scene_dir: Path) -> Path:
+    scene_id = prebuilt_scene_dir.name
+    preview_dir = INTERACT_RANDOM_PREVIEW_DIR / scene_id
+    config_path = prebuilt_scene_dir / "gym_export" / "gym_config.json"
+    return build_gradio_scene_from_fast_config(config_path, preview_dir)
+
+
 def current_scene_available_for_task_only() -> bool:
     return CURRENT_GYM_EXPORT_CONFIG.is_file()
 
@@ -2033,6 +2119,7 @@ def run_generate(
     robot_profile: str | None = None,
     run_log_mode: str = RUN_LOG_MODE_INTERACT,
     preserve_previous_video: bool = False,
+    prebuilt_scene_dir: Path | None = None,
 ):
     task_text = (task_text or "").strip()
     env_text = (env_text or "").strip()
@@ -2044,6 +2131,14 @@ def run_generate(
         mode = PIPELINE_MODE_TASK_ONLY
     else:
         raise ValueError(f"Unsupported scene mode: {scene_mode}")
+    requested_mode = mode
+    if requested_mode == PIPELINE_MODE_TASK_ONLY:
+        env_text = ""
+    resolved_prebuilt_scene_dir = prebuilt_scene_dir or prebuilt_scene_dir_for_image_value(
+        image_value
+    )
+    use_prebuilt_scene = resolved_prebuilt_scene_dir is not None
+    supervisor_mode = PIPELINE_MODE_INITIAL if use_prebuilt_scene else mode
     old_sim_process: subprocess.Popen[str] | None = None
     with runtime_lock:
         if runtime.is_busy:
@@ -2061,18 +2156,30 @@ def run_generate(
     token = uuid.uuid4().hex
     stage = (
         CURRENT_PATHS
-        if mode in {PIPELINE_MODE_EDIT, PIPELINE_MODE_TASK_ONLY}
+        if supervisor_mode in {PIPELINE_MODE_EDIT, PIPELINE_MODE_TASK_ONLY}
         else make_stage_paths(token)
     )
     initial_scene_path: Path | None = None
     existing_object_preview_path = (
         GRADIO_OBJECT_PREVIEW_GLB
-        if mode in {PIPELINE_MODE_EDIT, PIPELINE_MODE_TASK_ONLY}
+        if supervisor_mode in {PIPELINE_MODE_EDIT, PIPELINE_MODE_TASK_ONLY}
         and GRADIO_OBJECT_PREVIEW_GLB.is_file()
         else None
     )
+    prebuilt_initial_scene_dir: Path | None = None
     try:
-        if mode == PIPELINE_MODE_EDIT:
+        if use_prebuilt_scene:
+            if not task_text:
+                raise ValueError("Please enter a task description.")
+            if requested_mode == PIPELINE_MODE_EDIT and not env_text:
+                raise ValueError("Please enter a scene description to edit.")
+            image_path = save_input(image_value, task_text, stage.image_path)
+            prebuilt_initial_scene_dir = resolved_prebuilt_scene_dir
+            copy_prebuilt_scene_to_stage(prebuilt_initial_scene_dir, stage)
+            initial_scene_path = build_interact_random_initial_preview(
+                prebuilt_initial_scene_dir
+            )
+        elif mode == PIPELINE_MODE_EDIT:
             if not task_text:
                 raise ValueError("Please enter a task description.")
             if not env_text:
@@ -2110,10 +2217,24 @@ def run_generate(
         yield ui_snapshot()
         return
 
-    if mode == PIPELINE_MODE_EDIT:
+    should_edit_prebuilt_scene = (
+        prebuilt_initial_scene_dir is not None
+        and requested_mode != PIPELINE_MODE_TASK_ONLY
+        and bool(env_text)
+    )
+    if mode == PIPELINE_MODE_EDIT and prebuilt_initial_scene_dir is None:
         command = build_edit_pipeline_command(task_text, env_text, robot_profile)
-    elif mode == PIPELINE_MODE_TASK_ONLY:
+    elif mode == PIPELINE_MODE_TASK_ONLY and prebuilt_initial_scene_dir is None:
         command = build_task_only_config_command(task_text, robot_profile)
+    elif should_edit_prebuilt_scene:
+        command = build_scene_edit_pipeline_command(
+            task_text,
+            env_text,
+            stage,
+            robot_profile,
+        )
+    elif prebuilt_initial_scene_dir is not None:
+        command = build_config_command_for_paths(task_text, stage, robot_profile)
     else:
         command = build_initial_pipeline_command(
             task_text,
@@ -2128,6 +2249,8 @@ def run_generate(
         runtime.phase_key = "received"
         if mode == PIPELINE_MODE_EDIT:
             runtime.status = "Starting scene edit..."
+        elif should_edit_prebuilt_scene:
+            runtime.status = "Prebuilt scene loaded. Starting scene edit..."
         elif mode == PIPELINE_MODE_TASK_ONLY:
             runtime.status = "Current scene found. Regenerating action config only..."
         else:
@@ -2182,7 +2305,7 @@ def run_generate(
         args=(
             token,
             stage,
-            mode,
+            supervisor_mode,
             process,
             display_task_text,
             task_text,
@@ -2192,6 +2315,8 @@ def run_generate(
             parallel_env,
             robot_profile,
             run_log_mode,
+            initial_scene_path,
+            should_edit_prebuilt_scene,
         ),
         daemon=True,
     )
@@ -2231,7 +2356,7 @@ def start_auto_loop_state() -> str | None:
             image_dirs = ", ".join(str(path) for path in auto_image_directories())
             message = (
                 "Auto cannot start: no task input images were found. "
-                "Add task0_0.png through task4_3.png to one of: "
+                "Add task1_0.png through task5_3.png to one of: "
                 f"{image_dirs}"
             )
             runtime.phase_key = "failed"
@@ -2361,10 +2486,16 @@ def run_generate_for_top_mode(
     image_value: str | np.ndarray | Image.Image,
     task_text: str,
     env_text: str,
+    interact_prebuilt_scene_dir: str | None,
     language: str | None,
 ):
     parallel_env = action_mode == TOP_MODE_PARALLEL_ENV
     if run_mode != TOP_MODE_AUTO:
+        selected_prebuilt_scene_dir = (
+            Path(interact_prebuilt_scene_dir)
+            if interact_prebuilt_scene_dir
+            else None
+        )
         for snapshot in run_generate(
             image_value,
             task_text,
@@ -2374,6 +2505,7 @@ def run_generate_for_top_mode(
             parallel_env=parallel_env,
             robot_profile=robot_profile,
             run_log_mode=RUN_LOG_MODE_INTERACT,
+            prebuilt_scene_dir=selected_prebuilt_scene_dir,
         ):
             yield (
                 gr.update(),
@@ -2469,6 +2601,10 @@ def run_generate_for_top_mode(
             runtime.log_lines.append(
                 f"Auto selected {task_label}: task={auto_task!r}, scene={auto_scene!r}"
             )
+            if auto_input.prebuilt_scene_dir is not None:
+                runtime.log_lines.append(
+                    f"Auto prebuilt scene: {auto_input.prebuilt_scene_dir}"
+                )
             if auto_scene:
                 runtime.log_lines.append(f"Auto prompt2scene prompt: {auto_scene!r}")
         yield (
@@ -2498,6 +2634,7 @@ def run_generate_for_top_mode(
             robot_profile=robot_profile,
             run_log_mode=RUN_LOG_MODE_AUTO,
             preserve_previous_video=False,
+            prebuilt_scene_dir=auto_input.prebuilt_scene_dir,
         ):
             yield (
                 base_image,
@@ -2601,6 +2738,8 @@ def supervise_pipeline(
     parallel_env: bool,
     robot_profile: str | None,
     run_log_mode: str,
+    initial_scene_path: Path | None,
+    show_generated_scene_as_edit: bool,
 ) -> None:
     is_edit = mode == PIPELINE_MODE_EDIT
     is_task_only = mode == PIPELINE_MODE_TASK_ONLY
@@ -2676,7 +2815,12 @@ def supervise_pipeline(
                     )
                     scene_build_error = None
                     with runtime_lock:
-                        runtime.scene_model_path = scene_path
+                        if show_generated_scene_as_edit:
+                            if initial_scene_path is not None:
+                                runtime.scene_model_path = initial_scene_path
+                            runtime.edited_scene_model_path = scene_path
+                        else:
+                            runtime.scene_model_path = scene_path
                         runtime.phase_key = "preview"
                         runtime.status = "3D preview loaded."
                         runtime.last_error = None
@@ -2754,7 +2898,7 @@ def supervise_pipeline(
                 )
                 scene_build_error = None
                 with runtime_lock:
-                    if is_edit:
+                    if is_edit or show_generated_scene_as_edit:
                         runtime.edited_scene_model_path = scene_path
                     else:
                         runtime.scene_model_path = scene_path
@@ -2829,7 +2973,11 @@ def supervise_pipeline(
                 else:
                     initial_scene_error: str | None = None
                     try:
-                        ensure_initial_scene_snapshot(overwrite=True)
+                        if show_generated_scene_as_edit and initial_scene_path:
+                            GRADIO_SCENE_DIR.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(initial_scene_path, GRADIO_INITIAL_SCENE_GLB)
+                        else:
+                            ensure_initial_scene_snapshot(overwrite=True)
                     except Exception as exc:
                         initial_scene_error = str(exc)
                     with runtime_lock:
@@ -2837,11 +2985,19 @@ def supervise_pipeline(
                             runtime.image_path = IMAGE_PATH
                             if GRADIO_OBJECT_PREVIEW_GLB.is_file():
                                 runtime.object_model_path = GRADIO_OBJECT_PREVIEW_GLB
-                            if GRADIO_INITIAL_SCENE_GLB.is_file():
+                            if show_generated_scene_as_edit:
+                                if GRADIO_INITIAL_SCENE_GLB.is_file():
+                                    runtime.scene_model_path = GRADIO_INITIAL_SCENE_GLB
+                                elif initial_scene_path is not None:
+                                    runtime.scene_model_path = initial_scene_path
+                                if GRADIO_SCENE_GLB.is_file():
+                                    runtime.edited_scene_model_path = GRADIO_SCENE_GLB
+                            elif GRADIO_INITIAL_SCENE_GLB.is_file():
                                 runtime.scene_model_path = GRADIO_INITIAL_SCENE_GLB
                             elif GRADIO_SCENE_GLB.is_file():
                                 runtime.scene_model_path = GRADIO_SCENE_GLB
-                            runtime.edited_scene_model_path = None
+                            if not show_generated_scene_as_edit:
+                                runtime.edited_scene_model_path = None
                             if initial_scene_error:
                                 runtime.log_lines.append(
                                     f"Initial scene snapshot skipped: {initial_scene_error}"
@@ -2870,9 +3026,11 @@ def supervise_pipeline(
                 runtime.image_path = IMAGE_PATH if IMAGE_PATH.is_file() else None
                 if GRADIO_OBJECT_PREVIEW_GLB.is_file():
                     runtime.object_model_path = GRADIO_OBJECT_PREVIEW_GLB
-                if is_edit:
+                if is_edit or show_generated_scene_as_edit:
                     if GRADIO_INITIAL_SCENE_GLB.is_file():
                         runtime.scene_model_path = GRADIO_INITIAL_SCENE_GLB
+                    elif initial_scene_path is not None:
+                        runtime.scene_model_path = initial_scene_path
                     if GRADIO_SCENE_GLB.is_file():
                         runtime.edited_scene_model_path = GRADIO_SCENE_GLB
                 elif GRADIO_INITIAL_SCENE_GLB.is_file():
@@ -3197,14 +3355,29 @@ def run_reset_or_stop(run_mode: str):
 def randomize_interact_input(run_mode: str | None, language: str | None):
     """Fill the Interact form with one available template scene and task."""
     if run_mode != TOP_MODE_INTERACT:
-        return gr.update(), gr.update(), gr.update(), gr.update()
+        return gr.update(), gr.update(), gr.update(), gr.update(), None, gr.update(), None, None
     auto_input = generate_auto_text_input(language=language or LANGUAGE_EN)
+    initial_preview = None
+    if auto_input.prebuilt_scene_dir is not None:
+        initial_preview = build_interact_random_initial_preview(
+            auto_input.prebuilt_scene_dir
+        ).as_posix()
     return (
         auto_input.base_image_path.as_posix(),
         gr.update(value=auto_input.task_description, interactive=True),
         gr.update(value=auto_input.scene_description, interactive=True),
         SCENE_MODE_INITIAL,
+        auto_input.prebuilt_scene_dir.as_posix()
+        if auto_input.prebuilt_scene_dir
+        else None,
+        initial_preview,
+        None,
+        None,
     )
+
+
+def clear_interact_prebuilt_scene() -> None:
+    return None
 
 
 def button_updates(
@@ -3482,6 +3655,7 @@ def build_demo() -> gr.Blocks:
         action_mode = gr.State(None)
         language = gr.State(LANGUAGE_EN)
         last_seen_input_revision = gr.State(0)
+        interact_prebuilt_scene_dir = gr.State(None)
         with gr.Row(equal_height=True):
             if DEXFORCE_LOGO.is_file():
                 gr.Image(
@@ -3699,6 +3873,7 @@ def build_demo() -> gr.Blocks:
                 image_input,
                 task_input,
                 env_input,
+                interact_prebuilt_scene_dir,
                 language,
             ],
             outputs=[
@@ -3720,13 +3895,32 @@ def build_demo() -> gr.Blocks:
         random_input_button.click(
             randomize_interact_input,
             inputs=[run_mode, language],
-            outputs=[image_input, task_input, env_input, scene_mode],
+            outputs=[
+                image_input,
+                task_input,
+                env_input,
+                scene_mode,
+                interact_prebuilt_scene_dir,
+                model,
+                edited_model,
+                object_model,
+            ],
+            queue=False,
+        )
+        image_input.upload(
+            clear_interact_prebuilt_scene,
+            outputs=[interact_prebuilt_scene_dir],
             queue=False,
         )
         scene_mode.change(
             scene_mode_input_updates,
             inputs=[scene_mode],
             outputs=[task_input, env_input],
+            queue=False,
+        )
+        reset_button.click(
+            clear_interact_prebuilt_scene,
+            outputs=[interact_prebuilt_scene_dir],
             queue=False,
         )
         reset_button.click(

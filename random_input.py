@@ -13,6 +13,7 @@ import numpy as np
 EMBODICHAIN_ROOT = Path(
     os.environ.get("EMBODICHAIN_ROOT", "/home/dex/桌面/EmbodiChain")
 ).expanduser()
+APP_ROOT = Path(__file__).resolve().parent
 IMAGE_DIR = Path(
     os.environ.get(
         "AUTO_IMAGE_DIR",
@@ -23,6 +24,9 @@ AUTO_IMAGE_DIR_IS_CONFIGURED = "AUTO_IMAGE_DIR" in os.environ
 FALLBACK_IMAGE_DIR = (
     EMBODICHAIN_ROOT / "gym_project/action_agent_pipeline/baseline_image_input"
 )
+PREBUILT_SCENE_DIR = Path(
+    os.environ.get("AUTO_PREBUILT_SCENE_DIR", str(APP_ROOT / "scenes"))
+).expanduser()
 GENERATED_IMAGE_DIR = Path(
     os.environ.get("AUTO_GENERATED_IMAGE_DIR", "./tmp_img/auto")
 ).expanduser()
@@ -44,81 +48,81 @@ IMAGE_PROMPT = (
 )
 
 TASK_DESCRIPTIONS: dict[tuple[int, int], str] = {
-    (0, 0): "用双臂把两侧的罐头和瓶子放到篮子里",
-    (0, 1): "用双臂把两侧的方块放到篮子里",
-    (0, 2): "用双臂把两侧的方块和纸杯放到篮子里",
-    (0, 3): "用双臂把两侧的方块和苹果放到篮子里",
-    (1, 0): "用双臂把塑料水桶往前移动",
-    (1, 1): "用双臂把水杯往前移动",
-    (1, 2): "用双臂往把长方体前移动",
-    (1, 3): "用双臂把托盘往前移动",
-    (2, 0): "用双臂把两侧的瓶子扶正",
-    (2, 1): "用双臂把两侧的罐头扶正",
-    (2, 2): "用双臂把两侧的瓶子和罐头扶正",
-    (2, 3): "用双臂把两侧的纸杯和罐头扶正",
-    (3, 0): "把桌面上的物体按照方块按照从右往左的顺序叠起来",
-    (3, 1): "把桌面上的物体按照右边的方块，左边的方块，纸杯的顺序叠起来",
-    (3, 2): "把桌面上的物体按照方块，爆米花桶，纸杯的顺序叠起来",
-    (3, 3): "把桌面上的物体按照右边的爆米花桶，纸杯，固体胶的顺序叠起来",
-    (4, 0): "把桌面上的方块摆成一排",
-    (4, 1): "把桌面上的物体按照瓶子，方块排成一排",
-    (4, 2): "把桌面上的罐头摆成一排",
-    (4, 3): "把桌面上的物体按照瓶子，罐头，方块的顺序摆成一排",
+    (1, 0): "用双臂把两侧的罐头和瓶子放到篮子里",
+    (1, 1): "用双臂把两侧的方块放到篮子里",
+    (1, 2): "用双臂把两侧的方块和纸杯放到篮子里",
+    (1, 3): "用双臂把两侧的方块和苹果放到篮子里",
+    (2, 0): "用双臂把塑料水桶往前移动",
+    (2, 1): "用双臂把水杯往前移动",
+    (2, 2): "用双臂往把长方体前移动",
+    (2, 3): "用双臂把托盘往前移动",
+    (3, 1): "用双臂把两侧的瓶子扶正",
+    (3, 2): "用双臂把两侧的罐头扶正",
+    (3, 3): "用双臂把两侧的瓶子和罐头扶正",
+    (3, 4): "用双臂把两侧的纸杯和罐头扶正",
+    (4, 0): "把桌面上的物体按照方块按照从右往左的顺序叠起来",
+    (4, 1): "把桌面上的物体按照右边的方块，左边的方块，纸杯的顺序叠起来",
+    (4, 2): "把桌面上的物体按照方块，爆米花桶，纸杯的顺序叠起来",
+    (4, 3): "把桌面上的物体按照右边的爆米花桶，纸杯，固体胶的顺序叠起来",
+    (5, 0): "把桌面上的方块摆成一排",
+    (5, 1): "把桌面上的物体按照瓶子，方块排成一排",
+    (5, 2): "把桌面上的罐头摆成一排",
+    (5, 3): "把桌面上的物体按照瓶子，罐头，方块的顺序摆成一排",
 }
 
 TASK_DESCRIPTIONS_EN: dict[tuple[int, int], str] = {
-    (0, 0): "Use both arms to put the cans and bottles on both sides into the basket.",
-    (0, 1): "Use both arms to put the blocks on both sides into the basket.",
-    (0, 2): "Use both arms to put the blocks and paper cups on both sides into the basket.",
-    (0, 3): "Use both arms to put the blocks and apples on both sides into the basket.",
-    (1, 0): "Use both arms to move the plastic bucket forward.",
-    (1, 1): "Use both arms to move the cup forward.",
-    (1, 2): "Use both arms to move the rectangular block forward.",
-    (1, 3): "Use both arms to move the tray forward.",
-    (2, 0): "Use both arms to upright the bottles on both sides.",
-    (2, 1): "Use both arms to upright the cans on both sides.",
-    (2, 2): "Use both arms to upright the bottles and cans on both sides.",
-    (2, 3): "Use both arms to upright the paper cups and cans on both sides.",
-    (3, 0): "Use the right arm to stack the middle block on the right white block, then use the left arm to place the left block on top.",
-    (3, 1): "Stack the tabletop objects in this order: right block, left block, paper cup.",
-    (3, 2): "Stack the tabletop objects in this order: block, popcorn bucket, paper cup.",
-    (3, 3): "Stack the tabletop objects in this order: right popcorn bucket, paper cup, glue stick.",
-    (4, 0): "Arrange the blocks on the table in a row.",
-    (4, 1): "Arrange the tabletop objects in an alternating row of bottles and blocks.",
-    (4, 2): "Arrange the cans on the table in a row.",
-    (4, 3): "Arrange the tabletop objects in this order: bottle, can, block.",
+    (1, 0): "Use both arms to put the cans and bottles on both sides into the basket.",
+    (1, 1): "Use both arms to put the blocks on both sides into the basket.",
+    (1, 2): "Use both arms to put the blocks and paper cups on both sides into the basket.",
+    (1, 3): "Use both arms to put the blocks and apples on both sides into the basket.",
+    (2, 0): "Use both arms to move the plastic bucket forward.",
+    (2, 1): "Use both arms to move the cup forward.",
+    (2, 2): "Use both arms to move the rectangular block forward.",
+    (2, 3): "Use both arms to move the tray forward.",
+    (3, 1): "Use both arms to upright the bottles on both sides.",
+    (3, 2): "Use both arms to upright the cans on both sides.",
+    (3, 3): "Use both arms to upright the bottles and cans on both sides.",
+    (3, 4): "Use both arms to upright the paper cups and cans on both sides.",
+    (4, 0): "Use the right arm to stack the middle block on the right white block, then use the left arm to place the left block on top.",
+    (4, 1): "Stack the tabletop objects in this order: right block, left block, paper cup.",
+    (4, 2): "Stack the tabletop objects in this order: block, popcorn bucket, paper cup.",
+    (4, 3): "Stack the tabletop objects in this order: right popcorn bucket, paper cup, glue stick.",
+    (5, 0): "Arrange the blocks on the table in a row.",
+    (5, 1): "Arrange the tabletop objects in an alternating row of bottles and blocks.",
+    (5, 2): "Arrange the cans on the table in a row.",
+    (5, 3): "Arrange the tabletop objects in this order: bottle, can, block.",
 }
 
 RELATION_PATTERN = {
-    (0, 0): ["at the left side of the can", "at the right side of the bottle"],
-    (0, 1): [
+    (1, 0): ["at the left side of the can", "at the right side of the bottle"],
+    (1, 1): [
         "at the left side of the left cheese cube",
         "at the right side of the right cheese cube",
     ],
-    (0, 2): ["at the left side of the cube", "at the right side of the cup"],
-    (0, 3): ["at the left side of the cube", "at the right side of the apple"],
-    (1, 0): [],
-    (1, 1): [],
-    (1, 2): [],
-    (1, 3): [],
-    (2, 0): [
+    (1, 2): ["at the left side of the cube", "at the right side of the cup"],
+    (1, 3): ["at the left side of the cube", "at the right side of the apple"],
+    (2, 0): [],
+    (2, 1): [],
+    (2, 2): [],
+    (2, 3): [],
+    (3, 1): [
         "at the left side of the left bottle",
         "at the right side of the right bottle",
     ],
-    (2, 1): [
+    (3, 2): [
         "at the left side of the left soda can",
         "at the right side of the right soda can",
     ],
-    (2, 2): ["at the left side of the bottle", "at the right side of the can"],
-    (2, 3): ["at the left side of the paper cup", "at the right side of the soda can"],
-    (3, 0): [],
-    (3, 1): [],
-    (3, 2): [],
-    (3, 3): [],
+    (3, 3): ["at the left side of the bottle", "at the right side of the can"],
+    (3, 4): ["at the left side of the paper cup", "at the right side of the soda can"],
     (4, 0): [],
     (4, 1): [],
     (4, 2): [],
     (4, 3): [],
+    (5, 0): [],
+    (5, 1): [],
+    (5, 2): [],
+    (5, 3): [],
 }
 
 AREA_PATTERN = [
@@ -212,6 +216,7 @@ CHINESE_SPATIAL_RELATIONS = {
 class AutoInput:
     task_index: tuple[int, int]
     base_image_path: Path
+    prebuilt_scene_dir: Path | None
     image_path: Path | None
     task_description: str
     scene_description: str
@@ -220,8 +225,28 @@ class AutoInput:
         value = asdict(self)
         value["task_index"] = list(self.task_index)
         value["base_image_path"] = self.base_image_path.as_posix()
+        value["prebuilt_scene_dir"] = (
+            self.prebuilt_scene_dir.as_posix() if self.prebuilt_scene_dir else None
+        )
         value["image_path"] = self.image_path.as_posix() if self.image_path else None
         return value
+
+
+def task_id(task_index: tuple[int, int]) -> str:
+    return f"task{task_index[0]}_{task_index[1]}"
+
+
+def parse_task_id(value: str) -> tuple[int, int] | None:
+    stem = Path(value).stem
+    if not stem.startswith("task"):
+        return None
+    parts = stem[4:].split("_", maxsplit=1)
+    if len(parts) != 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
 
 
 def auto_image_directories() -> tuple[Path, ...]:
@@ -238,14 +263,15 @@ def auto_image_directories() -> tuple[Path, ...]:
 
 
 def available_auto_task_indices() -> tuple[tuple[int, int], ...]:
-    """Return only task variants whose input image can be resolved."""
+    """Return only task variants whose input image and clean scene can be resolved."""
     return tuple(
         task_index
         for task_index in TASK_DESCRIPTIONS
         if any(
-            (image_dir / f"task{task_index[0]}_{task_index[1]}.png").is_file()
+            (image_dir / f"{task_id(task_index)}.png").is_file()
             for image_dir in auto_image_directories()
         )
+        and get_prebuilt_scene_dir(task_index).is_dir()
     )
 
 
@@ -261,12 +287,16 @@ def random_task(rng: np.random.Generator) -> tuple[int, int]:
 
 
 def get_base_image_path(task_index: tuple[int, int]) -> Path:
-    filename = f"task{task_index[0]}_{task_index[1]}.png"
+    filename = f"{task_id(task_index)}.png"
     for image_dir in auto_image_directories():
         candidate = image_dir / filename
         if candidate.is_file():
             return candidate
     return IMAGE_DIR / filename
+
+
+def get_prebuilt_scene_dir(task_index: tuple[int, int]) -> Path:
+    return PREBUILT_SCENE_DIR / task_id(task_index)
 
 
 def get_task_description(task_index: tuple[int, int], *, language: str = "zh") -> str:
@@ -344,7 +374,7 @@ def create_text_input(
     language: str = "en",
 ) -> str:
     text_parts: list[str] = []
-    if task_index[0] == 4:
+    if task_index[0] == 5:
         return ""
 
     mu, sigma = 2.0, 1.0
@@ -390,11 +420,15 @@ def generate_auto_text_input(
     rng = rng or np.random.default_rng()
     task_index = task_index or random_task(rng)
     base_image_path = get_base_image_path(task_index)
+    prebuilt_scene_dir = get_prebuilt_scene_dir(task_index)
     if not base_image_path.is_file():
         raise FileNotFoundError(f"Base auto image not found: {base_image_path}")
+    if not prebuilt_scene_dir.is_dir():
+        raise FileNotFoundError(f"Prebuilt scene not found: {prebuilt_scene_dir}")
     return AutoInput(
         task_index=task_index,
         base_image_path=base_image_path,
+        prebuilt_scene_dir=prebuilt_scene_dir,
         image_path=None,
         task_description=get_task_description(task_index, language=language),
         scene_description=create_text_input(task_index, rng, language=language),
