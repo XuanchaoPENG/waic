@@ -111,6 +111,7 @@ BUTTON_LABELS = {
         "auto": "Auto",
         "interact": "Interact",
         "parallel_env": "Parallel Simulation",
+        "rerun_simulation": "Run Task",
         "generate": "Generate",
         "random_input": "Random Input",
         "reset": "Reset",
@@ -121,6 +122,7 @@ BUTTON_LABELS = {
         "auto": "自动",
         "interact": "交互",
         "parallel_env": "并行仿真",
+        "rerun_simulation": "运行任务",
         "generate": "生成",
         "random_input": "随机填充",
         "reset": "重置",
@@ -145,7 +147,6 @@ UI_TEXT = {
         "scene_mode_initial": "Initial generation",
         "scene_mode_edit": "Edit current scene",
         "scene_mode_task_only": "Change task only",
-        "random_material": "Random material",
         "previous_auto_run": "### Previous Auto Run",
         "previous_auto_image": "Previous input image",
         "previous_auto_task": "Previous task",
@@ -171,7 +172,6 @@ UI_TEXT = {
         "scene_mode_initial": "初始生成",
         "scene_mode_edit": "编辑当前场景",
         "scene_mode_task_only": "仅修改任务",
-        "random_material": "随机材质",
         "previous_auto_run": "### 上一轮自动运行",
         "previous_auto_image": "上一轮输入图像",
         "previous_auto_task": "上一轮任务",
@@ -1397,16 +1397,9 @@ def build_run_agent_command(
         "--renderer",
         "fast-rt"
     ]
+    command.extend(["--num_envs", "9" if parallel_env else "1"])
     if parallel_env:
-        command.extend(
-            [
-                "--num_envs",
-                "9",
-                "--arena_space",
-                "2.5",
-                "--filter_dataset_saving",
-            ]
-        )
+        command.extend(["--arena_space", "2.0", "--filter_dataset_saving"])
     profile = robot_profile_cli_value(robot_profile)
     if profile and run_agent_cli_supports_robot_profile():
         command.extend(["--robot-profile", profile])
@@ -2163,6 +2156,13 @@ def current_scene_available_for_task_only() -> bool:
     return CURRENT_GYM_EXPORT_CONFIG.is_file()
 
 
+def rerun_simulation_is_available() -> bool:
+    return (
+        CURRENT_PATHS.fast_gym_config.is_file()
+        and CURRENT_PATHS.agent_config.is_file()
+    )
+
+
 def run_generate(
     image_value: str | np.ndarray | Image.Image,
     task_text: str,
@@ -2554,7 +2554,6 @@ def run_generate_for_top_mode(
     run_mode: str,
     action_mode: str | None,
     scene_mode: str,
-    load_template_material: bool,
     robot_profile: str | None,
     image_value: str | np.ndarray | Image.Image,
     task_text: str,
@@ -2577,7 +2576,7 @@ def run_generate_for_top_mode(
             scene_mode=scene_mode,
             parallel_env=parallel_env,
             robot_profile=robot_profile,
-            load_template_material=load_template_material,
+            load_template_material=False,
             run_log_mode=RUN_LOG_MODE_INTERACT,
             prebuilt_scene_dir=selected_prebuilt_scene_dir,
         ):
@@ -2706,7 +2705,7 @@ def run_generate_for_top_mode(
             scene_mode=SCENE_MODE_INITIAL,
             parallel_env=parallel_env,
             robot_profile=robot_profile,
-            load_template_material=load_template_material,
+            load_template_material=False,
             run_log_mode=RUN_LOG_MODE_AUTO,
             preserve_previous_video=False,
             prebuilt_scene_dir=auto_input.prebuilt_scene_dir,
@@ -3428,6 +3427,76 @@ def run_reset_or_stop(run_mode: str):
     return run_reset()
 
 
+def rerun_current_simulation(
+    run_mode: str | None,
+    action_mode: str | None,
+    robot_profile: str | None,
+):
+    def _rerun_outputs():
+        return (
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            *ui_snapshot(),
+            *auto_history_snapshot(),
+        )
+
+    if run_mode != TOP_MODE_INTERACT:
+        with runtime_lock:
+            runtime.status = "Rerun 3D is only available in Interact mode."
+            runtime.last_error = runtime.status
+            runtime.log_lines.append(runtime.status)
+        return _rerun_outputs()
+
+    if not rerun_simulation_is_available():
+        with runtime_lock:
+            runtime.status = "Current simulation files are not available. Generate once first."
+            runtime.last_error = runtime.status
+            runtime.log_lines.append(runtime.status)
+        return _rerun_outputs()
+
+    token = uuid.uuid4().hex
+    with runtime_lock:
+        if runtime.process is not None:
+            runtime.status = "Another pipeline run is in progress. Stop it first."
+            runtime.last_error = runtime.status
+            runtime.log_lines.append(runtime.status)
+            return _rerun_outputs()
+        if runtime.sim_process is not None:
+            runtime.status = "Another Dexsim process is running. Stop it first."
+            runtime.last_error = runtime.status
+            runtime.log_lines.append(runtime.status)
+            return _rerun_outputs()
+        if runtime.is_busy:
+            runtime.status = "Another run is in progress. Stop it first."
+            runtime.last_error = runtime.status
+            runtime.log_lines.append(runtime.status)
+            return _rerun_outputs()
+
+        runtime.run_token = token
+        runtime.sim_started = False
+        runtime.sim_finished = False
+        runtime.sim_returncode = None
+        runtime.last_error = None
+        runtime.log_lines.append("Starting Dexsim rerun (run_agent only).")
+
+    simulation_error = launch_current_simulation(
+        runtime.run_token,
+        parallel_env=action_mode == TOP_MODE_PARALLEL_ENV,
+        robot_profile=robot_profile,
+        run_log_mode=RUN_LOG_MODE_INTERACT,
+        task_description=runtime.task_text,
+        scene_description=runtime.input_scene_text,
+    )
+    if simulation_error is not None:
+        with runtime_lock:
+            runtime.status = f"Dexsim rerun launch failed: {simulation_error}"
+            runtime.last_error = simulation_error
+            runtime.log_lines.append(runtime.status)
+
+    return _rerun_outputs()
+
+
 def randomize_interact_input(run_mode: str | None, language: str | None):
     """Fill the Interact form with one available template scene and task."""
     if run_mode != TOP_MODE_INTERACT:
@@ -3460,12 +3529,19 @@ def button_updates(
     language: str | None,
     run_mode: str | None,
     action_mode: str | None,
-) -> tuple[Any, Any, Any, Any, Any, Any]:
+) -> tuple[Any, Any, Any, Any, Any, Any, Any]:
     """Build localized labels while preserving the selected button variants."""
     labels = BUTTON_LABELS.get(language or LANGUAGE_EN, BUTTON_LABELS[LANGUAGE_EN])
     is_auto = run_mode == TOP_MODE_AUTO
     is_interact = run_mode != TOP_MODE_AUTO
     is_parallel_env = action_mode == TOP_MODE_PARALLEL_ENV
+    can_rerun = (
+        run_mode == TOP_MODE_INTERACT
+        and rerun_simulation_is_available()
+        and not runtime.is_busy
+        and runtime.process is None
+        and runtime.sim_process is None
+    )
     return (
         gr.update(
             value=labels["auto"],
@@ -3480,6 +3556,11 @@ def button_updates(
             variant="primary" if is_parallel_env else "secondary",
         ),
         gr.update(value=labels["generate"]),
+        gr.update(
+            value=labels["rerun_simulation"],
+            visible=is_interact,
+            interactive=can_rerun,
+        ),
         gr.update(value=labels["random_input"], visible=is_interact),
         gr.update(value=labels["stop"] if is_auto else labels["reset"]),
     )
@@ -3542,7 +3623,6 @@ def localized_ui_updates(
             label=text["scene_mode"],
             choices=scene_mode_choices(language),
         ),
-        gr.update(label=text["random_material"]),
         gr.update(label=video_preview_label(language, action_mode)),
         gr.update(label=text["current_task"]),
         gr.update(label=text["progress"]),
@@ -3672,6 +3752,7 @@ def auto_history_snapshot() -> tuple[str | None, str, str | None]:
 
 def synced_ui_snapshot(
     run_mode: str | None = None,
+    action_mode: str | None = None,
     last_seen_input_revision: int | None = None,
 ):
     sync_inputs = False
@@ -3689,6 +3770,12 @@ def synced_ui_snapshot(
         )
         input_task_text = runtime.input_task_text
         input_scene_text = runtime.input_scene_text
+        can_rerun = (
+            runtime.process is None
+            and runtime.sim_process is None
+            and not runtime.is_busy
+            and rerun_simulation_is_available()
+        )
 
     if sync_inputs:
         input_values = (image_value, input_task_text, input_scene_text)
@@ -3697,6 +3784,10 @@ def synced_ui_snapshot(
     return (
         *input_values,
         *ui_snapshot(),
+        gr.update(
+            visible=run_mode == TOP_MODE_INTERACT,
+            interactive=run_mode == TOP_MODE_INTERACT and can_rerun,
+        ),
         *auto_history_snapshot(),
         submitted_input_revision,
     )
@@ -3790,12 +3881,9 @@ def build_demo() -> gr.Blocks:
                     value=SCENE_MODE_INITIAL,
                     label=UI_TEXT[LANGUAGE_EN]["scene_mode"],
                 )
-                random_material = gr.Checkbox(
-                    value=False,
-                    label=UI_TEXT[LANGUAGE_EN]["random_material"],
-                )
                 with gr.Row():
                     generate_button = gr.Button("Generate", variant="primary")
+                    rerun_simulation_button = gr.Button("Run Task", variant="secondary")
                     random_input_button = gr.Button("Random Input")
                     reset_button = gr.Button("Reset", variant="stop")
             with gr.Column(scale=2):
@@ -3869,6 +3957,7 @@ def build_demo() -> gr.Blocks:
             interact_button,
             parallel_env_button,
             generate_button,
+            rerun_simulation_button,
             random_input_button,
             reset_button,
             current_image,
@@ -3920,6 +4009,7 @@ def build_demo() -> gr.Blocks:
                 interact_button,
                 parallel_env_button,
                 generate_button,
+                rerun_simulation_button,
                 random_input_button,
                 reset_button,
                 language_button,
@@ -3930,7 +4020,6 @@ def build_demo() -> gr.Blocks:
                 task_input,
                 env_input,
                 scene_mode,
-                random_material,
                 current_image,
                 current_task,
                 progress,
@@ -3951,7 +4040,6 @@ def build_demo() -> gr.Blocks:
                 run_mode,
                 action_mode,
                 scene_mode,
-                random_material,
                 robot_profile,
                 image_input,
                 task_input,
@@ -3987,6 +4075,30 @@ def build_demo() -> gr.Blocks:
                 model,
                 edited_model,
                 object_model,
+            ],
+            queue=False,
+        )
+        rerun_simulation_button.click(
+            rerun_current_simulation,
+            inputs=[
+                run_mode,
+                action_mode,
+                robot_profile,
+            ],
+            outputs=[
+                image_input,
+                task_input,
+                env_input,
+                current_image,
+                current_task,
+                progress,
+                status,
+                model,
+                edited_model,
+                object_model,
+                previous_auto_image,
+                previous_auto_task,
+                previous_auto_video,
             ],
             queue=False,
         )
@@ -4028,7 +4140,7 @@ def build_demo() -> gr.Blocks:
         )
         refresh_timer.tick(
             synced_ui_snapshot,
-            inputs=[run_mode, last_seen_input_revision],
+            inputs=[run_mode, action_mode, last_seen_input_revision],
             outputs=[
                 image_input,
                 task_input,
@@ -4040,6 +4152,7 @@ def build_demo() -> gr.Blocks:
                 model,
                 edited_model,
                 object_model,
+                rerun_simulation_button,
                 previous_auto_image,
                 previous_auto_task,
                 previous_auto_video,
