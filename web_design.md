@@ -72,6 +72,7 @@ GRADIO_ANALYTICS_ENABLED=False
   Task description
   Scene description
   Generation mode: Initial generation / Edit current scene / Change task only
+  Random material
   Generate
   Random Input
   Reset / Stop
@@ -139,6 +140,7 @@ Parallel Simulation 打开时，dexsim/run-agent 追加：
 - `Task description`：所有模式都必填，传给 action-agent。
 - `Scene description`：初始生成时作为 Prompt2Scene 场景提示；编辑时作为对当前场景的编辑提示；仅修改任务模式不可编辑。
 - `Generation mode`：显式选择 `Initial generation`、`Edit current scene` 或 `Change task only`，不再根据 Scene description 是否为空推断模式。
+- `Random material`：独立开关，不与 Generation mode 三个选项互斥；选中时在 Prompt2Scene/action config 模板命令中追加 `--load-template-material`。
 
 模式规则：
 
@@ -220,6 +222,12 @@ python -m embodichain.gen_sim.action_agent_pipeline.cli.run_agent_pipeline \
   --skip-run-agent
 ```
 
+选中 `Random material` 时追加：
+
+```bash
+  --load-template-material
+```
+
 如果选择了 Robot，会追加：
 
 ```bash
@@ -282,6 +290,12 @@ python -m embodichain.gen_sim.action_agent_pipeline.cli.generate_action_agent_co
   --task_description "<Task description>" \
   --target_body_scale 1.3 \
   --overwrite
+```
+
+选中 `Random material` 时追加：
+
+```bash
+  --load-template-material
 ```
 
 同样会根据 Robot 追加 `--robot-profile dual_ur5` 或 `--robot-profile franka`。

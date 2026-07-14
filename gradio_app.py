@@ -145,6 +145,7 @@ UI_TEXT = {
         "scene_mode_initial": "Initial generation",
         "scene_mode_edit": "Edit current scene",
         "scene_mode_task_only": "Change task only",
+        "random_material": "Random material",
         "previous_auto_run": "### Previous Auto Run",
         "previous_auto_image": "Previous input image",
         "previous_auto_task": "Previous task",
@@ -170,6 +171,7 @@ UI_TEXT = {
         "scene_mode_initial": "初始生成",
         "scene_mode_edit": "编辑当前场景",
         "scene_mode_task_only": "仅修改任务",
+        "random_material": "随机材质",
         "previous_auto_run": "### 上一轮自动运行",
         "previous_auto_image": "上一轮输入图像",
         "previous_auto_task": "上一轮任务",
@@ -585,6 +587,7 @@ def build_initial_pipeline_command(
     paths: ScenePaths,
     prompt2scene_prompt: str = "",
     robot_profile: str | None = None,
+    load_template_material: bool = False,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -610,6 +613,8 @@ def build_initial_pipeline_command(
         command.extend(["--robot-profile", profile])
     if prompt2scene_prompt.strip():
         command.extend(["--prompt2scene-prompt", prompt2scene_prompt.strip()])
+    if load_template_material:
+        command.append("--load-template-material")
     return command
 
 
@@ -617,12 +622,14 @@ def build_edit_pipeline_command(
     task_text: str,
     env_text: str,
     robot_profile: str | None = None,
+    load_template_material: bool = False,
 ) -> list[str]:
     return build_scene_edit_pipeline_command(
         task_text,
         env_text,
         CURRENT_PATHS,
         robot_profile,
+        load_template_material,
     )
 
 
@@ -631,6 +638,7 @@ def build_scene_edit_pipeline_command(
     env_text: str,
     paths: ScenePaths,
     robot_profile: str | None = None,
+    load_template_material: bool = False,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -654,20 +662,29 @@ def build_scene_edit_pipeline_command(
     profile = robot_profile_cli_value(robot_profile)
     if profile:
         command.extend(["--robot-profile", profile])
+    if load_template_material:
+        command.append("--load-template-material")
     return command
 
 
 def build_task_only_config_command(
     task_text: str,
     robot_profile: str | None = None,
+    load_template_material: bool = False,
 ) -> list[str]:
-    return build_config_command_for_paths(task_text, CURRENT_PATHS, robot_profile)
+    return build_config_command_for_paths(
+        task_text,
+        CURRENT_PATHS,
+        robot_profile,
+        load_template_material,
+    )
 
 
 def build_config_command_for_paths(
     task_text: str,
     paths: ScenePaths,
     robot_profile: str | None = None,
+    load_template_material: bool = False,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -688,6 +705,8 @@ def build_config_command_for_paths(
     profile = robot_profile_cli_value(robot_profile)
     if profile:
         command.extend(["--robot-profile", profile])
+    if load_template_material:
+        command.append("--load-template-material")
     return command
 
 
@@ -2117,6 +2136,7 @@ def run_generate(
     scene_mode: str = SCENE_MODE_INITIAL,
     parallel_env: bool = False,
     robot_profile: str | None = None,
+    load_template_material: bool = False,
     run_log_mode: str = RUN_LOG_MODE_INTERACT,
     preserve_previous_video: bool = False,
     prebuilt_scene_dir: Path | None = None,
@@ -2223,24 +2243,40 @@ def run_generate(
         and bool(env_text)
     )
     if mode == PIPELINE_MODE_EDIT and prebuilt_initial_scene_dir is None:
-        command = build_edit_pipeline_command(task_text, env_text, robot_profile)
+        command = build_edit_pipeline_command(
+            task_text,
+            env_text,
+            robot_profile,
+            load_template_material,
+        )
     elif mode == PIPELINE_MODE_TASK_ONLY and prebuilt_initial_scene_dir is None:
-        command = build_task_only_config_command(task_text, robot_profile)
+        command = build_task_only_config_command(
+            task_text,
+            robot_profile,
+            load_template_material,
+        )
     elif should_edit_prebuilt_scene:
         command = build_scene_edit_pipeline_command(
             task_text,
             env_text,
             stage,
             robot_profile,
+            load_template_material,
         )
     elif prebuilt_initial_scene_dir is not None:
-        command = build_config_command_for_paths(task_text, stage, robot_profile)
+        command = build_config_command_for_paths(
+            task_text,
+            stage,
+            robot_profile,
+            load_template_material,
+        )
     else:
         command = build_initial_pipeline_command(
             task_text,
             stage,
             env_text,
             robot_profile,
+            load_template_material,
         )
     display_task_text = format_current_task(task_text, env_text)
     with runtime_lock:
@@ -2482,6 +2518,7 @@ def run_generate_for_top_mode(
     run_mode: str,
     action_mode: str | None,
     scene_mode: str,
+    load_template_material: bool,
     robot_profile: str | None,
     image_value: str | np.ndarray | Image.Image,
     task_text: str,
@@ -2504,6 +2541,7 @@ def run_generate_for_top_mode(
             scene_mode=scene_mode,
             parallel_env=parallel_env,
             robot_profile=robot_profile,
+            load_template_material=load_template_material,
             run_log_mode=RUN_LOG_MODE_INTERACT,
             prebuilt_scene_dir=selected_prebuilt_scene_dir,
         ):
@@ -2632,6 +2670,7 @@ def run_generate_for_top_mode(
             scene_mode=SCENE_MODE_INITIAL,
             parallel_env=parallel_env,
             robot_profile=robot_profile,
+            load_template_material=load_template_material,
             run_log_mode=RUN_LOG_MODE_AUTO,
             preserve_previous_video=False,
             prebuilt_scene_dir=auto_input.prebuilt_scene_dir,
@@ -3466,6 +3505,7 @@ def localized_ui_updates(
             label=text["scene_mode"],
             choices=scene_mode_choices(language),
         ),
+        gr.update(label=text["random_material"]),
         gr.update(label=video_preview_label(language, action_mode)),
         gr.update(label=text["current_task"]),
         gr.update(label=text["progress"]),
@@ -3713,6 +3753,10 @@ def build_demo() -> gr.Blocks:
                     value=SCENE_MODE_INITIAL,
                     label=UI_TEXT[LANGUAGE_EN]["scene_mode"],
                 )
+                random_material = gr.Checkbox(
+                    value=False,
+                    label=UI_TEXT[LANGUAGE_EN]["random_material"],
+                )
                 with gr.Row():
                     generate_button = gr.Button("Generate", variant="primary")
                     random_input_button = gr.Button("Random Input")
@@ -3849,6 +3893,7 @@ def build_demo() -> gr.Blocks:
                 task_input,
                 env_input,
                 scene_mode,
+                random_material,
                 current_image,
                 current_task,
                 progress,
@@ -3869,6 +3914,7 @@ def build_demo() -> gr.Blocks:
                 run_mode,
                 action_mode,
                 scene_mode,
+                random_material,
                 robot_profile,
                 image_input,
                 task_input,
