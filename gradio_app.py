@@ -193,8 +193,12 @@ SCENE_MODE_EDIT = "edit"
 SCENE_MODE_TASK_ONLY = "task_only"
 ROBOT_PROFILE_FRANKA = "Franka"
 ROBOT_PROFILE_UR5 = "UR5"
+ROBOT_PROFILE_UR10 = "UR10"
+ROBOT_PROFILES = [ROBOT_PROFILE_FRANKA, ROBOT_PROFILE_UR5, ROBOT_PROFILE_UR10]
+DEFAULT_ROBOT_PROFILE = ROBOT_PROFILE_UR5
 RUN_LOG_MODE_AUTO = "auto"
 RUN_LOG_MODE_INTERACT = "interact"
+_RUN_AGENT_SUPPORTS_ROBOT_PROFILE: bool | None = None
 VIDEO_SYNC_JS = r"""
 () => {
     const audienceRootId = "embodichain-audience-video";
@@ -715,6 +719,8 @@ def robot_profile_cli_value(robot_profile: str | None) -> str | None:
         return "franka"
     if robot_profile == ROBOT_PROFILE_UR5:
         return "dual_ur5"
+    if robot_profile == ROBOT_PROFILE_UR10:
+        return "dual_ur10"
     return None
 
 
@@ -1375,6 +1381,7 @@ def build_run_agent_command(
     paths: ScenePaths,
     *,
     parallel_env: bool = False,
+    robot_profile: str | None = None,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -1388,7 +1395,7 @@ def build_run_agent_command(
         str(paths.agent_config),
         "--regenerate",
         "--renderer",
-        "hybrid"
+        "fast-rt"
     ]
     if parallel_env:
         command.extend(
@@ -1400,7 +1407,36 @@ def build_run_agent_command(
                 "--filter_dataset_saving",
             ]
         )
+    profile = robot_profile_cli_value(robot_profile)
+    if profile and run_agent_cli_supports_robot_profile():
+        command.extend(["--robot-profile", profile])
     return command
+
+
+def run_agent_cli_supports_robot_profile() -> bool:
+    global _RUN_AGENT_SUPPORTS_ROBOT_PROFILE
+    if _RUN_AGENT_SUPPORTS_ROBOT_PROFILE is not None:
+        return _RUN_AGENT_SUPPORTS_ROBOT_PROFILE
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "embodichain.gen_sim.action_agent_pipeline.cli.run_agent",
+                "--help",
+            ],
+            cwd=EMBODICHAIN_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=build_pipeline_env(),
+            timeout=20,
+        )
+        help_text = (result.stdout or "").lower()
+        _RUN_AGENT_SUPPORTS_ROBOT_PROFILE = "--robot-profile" in help_text
+    except Exception:
+        _RUN_AGENT_SUPPORTS_ROBOT_PROFILE = False
+    return _RUN_AGENT_SUPPORTS_ROBOT_PROFILE
 
 
 def start_pipeline(command: list[str]) -> subprocess.Popen[str]:
@@ -3158,6 +3194,7 @@ def launch_current_simulation(
     command = build_run_agent_command(
         CURRENT_PATHS,
         parallel_env=parallel_env,
+        robot_profile=robot_profile,
     )
     started_at_ns = time.time_ns()
     try:
@@ -3723,8 +3760,8 @@ def build_demo() -> gr.Blocks:
                 )
             with gr.Column(scale=1):
                 robot_profile = gr.Radio(
-                    choices=[ROBOT_PROFILE_FRANKA, ROBOT_PROFILE_UR5],
-                    value=ROBOT_PROFILE_UR5,
+                    choices=ROBOT_PROFILES,
+                    value=DEFAULT_ROBOT_PROFILE,
                     label=UI_TEXT[LANGUAGE_EN]["robot"],
                 )
 
