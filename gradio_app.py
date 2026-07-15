@@ -2605,6 +2605,119 @@ def run_generate_for_top_mode(
     with runtime_lock:
         runtime.language = language or LANGUAGE_EN
 
+    def run_auto_phase(
+        phase_name: str,
+        base_image: str,
+        task_text: str,
+        scene_text: str,
+        *,
+        scene_mode: str,
+        parallel_env: bool,
+        robot_profile: str | None,
+        force_initial: bool = False,
+        prebuilt_scene_dir: Path | None = None,
+        preserve_previous_video: bool = False,
+        update_previous_run: bool = False,
+    ):
+        for snapshot in run_generate(
+            base_image,
+            task_text,
+            scene_text,
+            force_initial=force_initial,
+            scene_mode=scene_mode,
+            parallel_env=parallel_env,
+            robot_profile=robot_profile,
+            load_template_material=False,
+            run_log_mode=RUN_LOG_MODE_AUTO,
+            preserve_previous_video=preserve_previous_video,
+            prebuilt_scene_dir=prebuilt_scene_dir,
+        ):
+            yield (
+                base_image,
+                task_text,
+                scene_text,
+                *snapshot,
+                *auto_history_snapshot(),
+            )
+            if not auto_loop_is_active(loop_token):
+                break
+
+        if not auto_loop_is_active(loop_token):
+            archive_run_log(
+                mode=RUN_LOG_MODE_AUTO,
+                task_description=task_text,
+                scene_description=scene_text,
+                outcome="stopped",
+            )
+            return "stopped"
+
+        with runtime_lock:
+            pipeline_failed = runtime.phase_key == "failed"
+            pipeline_error = runtime.last_error
+        if pipeline_failed:
+            cleanup_auto_generated_artifacts()
+            if pipeline_error:
+                with runtime_lock:
+                    runtime.last_error = pipeline_error
+                    runtime.log_lines.append(
+                        f"{phase_name} generation failed: {pipeline_error}"
+                    )
+            archive_run_log(
+                mode=RUN_LOG_MODE_AUTO,
+                task_description=task_text,
+                scene_description=scene_text,
+                outcome="pipeline_failed",
+            )
+            return "pipeline_failed"
+
+        for snapshot in wait_for_current_simulation_to_exit(
+            loop_token,
+            base_image,
+            task_text,
+            scene_text,
+        ):
+            yield snapshot
+
+        if not auto_loop_is_active(loop_token):
+            archive_run_log(
+                mode=RUN_LOG_MODE_AUTO,
+                task_description=task_text,
+                scene_description=scene_text,
+                outcome="stopped",
+            )
+            return "stopped"
+
+        with runtime_lock:
+            simulation_completed = (
+                runtime.sim_started
+                and runtime.sim_finished
+                and runtime.sim_process is None
+            )
+            round_outcome = (
+                "completed" if simulation_completed else "simulation_failed"
+            )
+        log_path = archive_run_log(
+            mode=RUN_LOG_MODE_AUTO,
+            task_description=task_text,
+            scene_description=scene_text,
+            outcome=round_outcome,
+        )
+        archived_video = archived_audience_video_path(log_path)
+        if update_previous_run:
+            with runtime_lock:
+                runtime.previous_auto_image_path = Path(base_image)
+                runtime.previous_auto_task_text = runtime.task_text
+                runtime.previous_auto_video_path = archived_video or runtime.video_path
+                runtime.video_path = None
+        yield (
+            base_image,
+            task_text,
+            scene_text,
+            *ui_snapshot(extra_status=f"{phase_name}: {round_outcome}."),
+            *auto_history_snapshot(),
+        )
+        return round_outcome
+
     while auto_loop_is_active(loop_token):
         auto_task = ""
         auto_scene = ""
@@ -2699,100 +2812,182 @@ def run_generate_for_top_mode(
             )
             break
 
-        for snapshot in run_generate(
+        with runtime_lock:
+            selected_language = runtime.language
+        phase_results: list[str] = []
+
+        phase_results.append("stopped")
+        phase_generator = run_auto_phase(
+            "Initial generation",
             base_image,
             auto_task,
             auto_scene,
-            force_initial=True,
             scene_mode=SCENE_MODE_INITIAL,
-            parallel_env=parallel_env,
+            parallel_env=False,
             robot_profile=robot_profile,
-            load_template_material=False,
-            run_log_mode=RUN_LOG_MODE_AUTO,
-            preserve_previous_video=False,
+            force_initial=True,
             prebuilt_scene_dir=auto_input.prebuilt_scene_dir,
-        ):
+            preserve_previous_video=False,
+            update_previous_run=False,
+        )
+        try:
+            while True:
+                yield next(phase_generator)
+        except StopIteration as exc:
+            phase_results[0] = str(exc.value)
+
+        if phase_results[0] == "stopped":
+            break
+        if phase_results[0] == "pipeline_failed":
+            continue
+
+        try:
+            if auto_scene:
+                auto_edit_input = generate_auto_text_input(language=selected_language)
+                auto_edit_scene = auto_scene
+            else:
+                auto_edit_input = generate_auto_text_input(
+                    language=selected_language,
+                    ensure_scene=True,
+                )
+                auto_edit_scene = auto_edit_input.scene_description
+        except Exception as exc:
+            with runtime_lock:
+                runtime.phase_key = "failed"
+                runtime.status = f"Auto edit text generation failed: {exc}"
+                runtime.last_error = str(exc)
+                runtime.log_lines.append(runtime.status)
             yield (
-                base_image,
-                auto_task,
-                auto_scene,
-                *snapshot,
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                *ui_snapshot(),
                 *auto_history_snapshot(),
             )
-            if not auto_loop_is_active(loop_token):
-                break
-
-        if not auto_loop_is_active(loop_token):
             archive_run_log(
                 mode=RUN_LOG_MODE_AUTO,
                 task_description=auto_task,
                 scene_description=auto_scene,
-                outcome="stopped",
-            )
-            break
-
-        with runtime_lock:
-            pipeline_failed = runtime.phase_key == "failed"
-            pipeline_error = runtime.last_error
-        if pipeline_failed:
-            cleanup_auto_generated_artifacts()
-            if pipeline_error:
-                with runtime_lock:
-                    runtime.last_error = pipeline_error
-                    runtime.log_lines.append(
-                        f"Auto continuing after failure: {pipeline_error}"
-                    )
-            archive_run_log(
-                mode=RUN_LOG_MODE_AUTO,
-                task_description=auto_task,
-                scene_description=auto_scene,
-                outcome="pipeline_failed",
+                outcome="text_generation_failed",
             )
             continue
 
-        for snapshot in wait_for_current_simulation_to_exit(
-            loop_token,
+        phase_results.append("stopped")
+        phase_generator = run_auto_phase(
+            "Scene edit",
             base_image,
-            auto_task,
-            auto_scene,
-        ):
-            yield snapshot
+            auto_edit_input.task_description,
+            auto_edit_scene,
+            scene_mode=SCENE_MODE_EDIT,
+            parallel_env=False,
+            robot_profile=robot_profile,
+            force_initial=False,
+            preserve_previous_video=False,
+            update_previous_run=False,
+        )
+        try:
+            while True:
+                yield next(phase_generator)
+        except StopIteration as exc:
+            phase_results[1] = str(exc.value)
 
-        if not auto_loop_is_active(loop_token):
+        if phase_results[1] == "stopped":
+            break
+        if phase_results[1] == "pipeline_failed":
+            continue
+
+        try:
+            auto_parallel_input = generate_auto_text_input(language=selected_language)
+        except Exception as exc:
+            with runtime_lock:
+                runtime.phase_key = "failed"
+                runtime.status = f"Auto parallel input generation failed: {exc}"
+                runtime.last_error = str(exc)
+                runtime.log_lines.append(runtime.status)
+            yield (
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                *ui_snapshot(),
+                *auto_history_snapshot(),
+            )
             archive_run_log(
                 mode=RUN_LOG_MODE_AUTO,
                 task_description=auto_task,
                 scene_description=auto_scene,
-                outcome="stopped",
+                outcome="text_generation_failed",
             )
+            continue
+
+        phase_results.append("stopped")
+        phase_generator = run_auto_phase(
+            "Parallel simulation",
+            base_image,
+            auto_parallel_input.task_description,
+            "",
+            scene_mode=SCENE_MODE_TASK_ONLY,
+            parallel_env=True,
+            robot_profile=robot_profile,
+            force_initial=False,
+            preserve_previous_video=False,
+            update_previous_run=False,
+        )
+        try:
+            while True:
+                yield next(phase_generator)
+        except StopIteration as exc:
+            phase_results[2] = str(exc.value)
+
+        if phase_results[2] == "stopped":
+            break
+        if phase_results[2] == "pipeline_failed":
+            continue
+
+        try:
+            auto_franka_input = generate_auto_text_input(language=selected_language)
+        except Exception as exc:
+            with runtime_lock:
+                runtime.phase_key = "failed"
+                runtime.status = f"Auto final input generation failed: {exc}"
+                runtime.last_error = str(exc)
+                runtime.log_lines.append(runtime.status)
+            yield (
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                *ui_snapshot(),
+                *auto_history_snapshot(),
+            )
+            archive_run_log(
+                mode=RUN_LOG_MODE_AUTO,
+                task_description=auto_task,
+                scene_description=auto_scene,
+                outcome="text_generation_failed",
+            )
+            continue
+
+        phase_results.append("stopped")
+        phase_generator = run_auto_phase(
+            "Task-only Franka",
+            base_image,
+            auto_franka_input.task_description,
+            "",
+            scene_mode=SCENE_MODE_TASK_ONLY,
+            parallel_env=False,
+            robot_profile=ROBOT_PROFILE_FRANKA,
+            force_initial=False,
+            preserve_previous_video=False,
+            update_previous_run=True,
+        )
+        try:
+            while True:
+                yield next(phase_generator)
+        except StopIteration as exc:
+            phase_results[3] = str(exc.value)
+
+        if phase_results[3] == "stopped":
             break
 
-        with runtime_lock:
-            simulation_completed = (
-                runtime.sim_started
-                and runtime.sim_finished
-                and runtime.sim_process is None
-            )
-            round_outcome = "completed" if simulation_completed else "simulation_failed"
-        log_path = archive_run_log(
-            mode=RUN_LOG_MODE_AUTO,
-            task_description=auto_task,
-            scene_description=auto_scene,
-            outcome=round_outcome,
-        )
-        archived_video = archived_audience_video_path(log_path)
-        with runtime_lock:
-            runtime.previous_auto_image_path = Path(base_image)
-            runtime.previous_auto_task_text = runtime.task_text
-            runtime.previous_auto_video_path = archived_video or runtime.video_path
-            runtime.video_path = None
-        yield (
-            base_image,
-            auto_task,
-            auto_scene,
-            *ui_snapshot(extra_status="Auto video archived and ready to play."),
-            *auto_history_snapshot(),
-        )
         cleanup_errors = cleanup_auto_generated_artifacts()
         if cleanup_errors:
             with runtime_lock:
