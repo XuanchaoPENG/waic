@@ -113,7 +113,8 @@ BUTTON_LABELS = {
         "parallel_env": "Parallel Simulation",
         "rerun_simulation": "Run Task",
         "generate": "Generate",
-        "random_input": "Random Input",
+        "random_input": "Random Task",
+        "random_scene_input": "Random Scene",
         "reset": "Reset",
         "stop": "Stop",
         "language": "中文",
@@ -124,7 +125,8 @@ BUTTON_LABELS = {
         "parallel_env": "并行仿真",
         "rerun_simulation": "运行任务",
         "generate": "生成",
-        "random_input": "随机填充",
+        "random_input": "随机任务",
+        "random_scene_input": "随机场景",
         "reset": "重置",
         "stop": "停止",
         "language": "English",
@@ -3497,10 +3499,19 @@ def rerun_current_simulation(
     return _rerun_outputs()
 
 
-def randomize_interact_input(run_mode: str | None, language: str | None):
-    """Fill the Interact form with one available template scene and task."""
+def randomize_interact_task_input(run_mode: str | None, language: str | None):
+    """Fill the Interact form with one available template task."""
     if run_mode != TOP_MODE_INTERACT:
-        return gr.update(), gr.update(), gr.update(), gr.update(), None, gr.update(), None, None
+        return (
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            None,
+            gr.update(),
+            None,
+            None,
+        )
     auto_input = generate_auto_text_input(language=language or LANGUAGE_EN)
     initial_preview = None
     if auto_input.prebuilt_scene_dir is not None:
@@ -3510,7 +3521,7 @@ def randomize_interact_input(run_mode: str | None, language: str | None):
     return (
         auto_input.base_image_path.as_posix(),
         gr.update(value=auto_input.task_description, interactive=True),
-        gr.update(value=auto_input.scene_description, interactive=True),
+        gr.update(),
         SCENE_MODE_INITIAL,
         auto_input.prebuilt_scene_dir.as_posix()
         if auto_input.prebuilt_scene_dir
@@ -3521,6 +3532,14 @@ def randomize_interact_input(run_mode: str | None, language: str | None):
     )
 
 
+def randomize_interact_scene_input(run_mode: str | None, language: str | None):
+    """Fill only the scene text in the Interact form."""
+    if run_mode != TOP_MODE_INTERACT:
+        return gr.update()
+    auto_input = generate_auto_text_input(language=language or LANGUAGE_EN)
+    return gr.update(value=auto_input.scene_description, interactive=True)
+
+
 def clear_interact_prebuilt_scene() -> None:
     return None
 
@@ -3529,7 +3548,7 @@ def button_updates(
     language: str | None,
     run_mode: str | None,
     action_mode: str | None,
-) -> tuple[Any, Any, Any, Any, Any, Any, Any]:
+) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
     """Build localized labels while preserving the selected button variants."""
     labels = BUTTON_LABELS.get(language or LANGUAGE_EN, BUTTON_LABELS[LANGUAGE_EN])
     is_auto = run_mode == TOP_MODE_AUTO
@@ -3562,6 +3581,7 @@ def button_updates(
             interactive=can_rerun,
         ),
         gr.update(value=labels["random_input"], visible=is_interact),
+        gr.update(value=labels["random_scene_input"], visible=is_interact),
         gr.update(value=labels["stop"] if is_auto else labels["reset"]),
     )
 
@@ -3866,16 +3886,20 @@ def build_demo() -> gr.Blocks:
                     height=320,
                 )
                 with gr.Row():
-                    task_input = gr.Textbox(
-                        label=UI_TEXT[LANGUAGE_EN]["task_description"],
-                        placeholder=UI_TEXT[LANGUAGE_EN]["task_placeholder"],
-                        lines=1,
-                    )
-                    env_input = gr.Textbox(
-                        label=UI_TEXT[LANGUAGE_EN]["scene_description"],
-                        placeholder=UI_TEXT[LANGUAGE_EN]["scene_placeholder"],
-                        lines=1,
-                    )
+                    with gr.Column():
+                        task_input = gr.Textbox(
+                            label=UI_TEXT[LANGUAGE_EN]["task_description"],
+                            placeholder=UI_TEXT[LANGUAGE_EN]["task_placeholder"],
+                            lines=1,
+                        )
+                        random_task_input_button = gr.Button("Random Task")
+                    with gr.Column():
+                        env_input = gr.Textbox(
+                            label=UI_TEXT[LANGUAGE_EN]["scene_description"],
+                            placeholder=UI_TEXT[LANGUAGE_EN]["scene_placeholder"],
+                            lines=1,
+                        )
+                        random_scene_input_button = gr.Button("Random Scene")
                 scene_mode = gr.Radio(
                     choices=scene_mode_choices(LANGUAGE_EN),
                     value=SCENE_MODE_INITIAL,
@@ -3884,7 +3908,6 @@ def build_demo() -> gr.Blocks:
                 with gr.Row():
                     generate_button = gr.Button("Generate", variant="primary")
                     rerun_simulation_button = gr.Button("Run Task", variant="secondary")
-                    random_input_button = gr.Button("Random Input")
                     reset_button = gr.Button("Reset", variant="stop")
             with gr.Column(scale=2):
                 current_image = gr.Video(
@@ -3958,7 +3981,8 @@ def build_demo() -> gr.Blocks:
             parallel_env_button,
             generate_button,
             rerun_simulation_button,
-            random_input_button,
+            random_task_input_button,
+            random_scene_input_button,
             reset_button,
             current_image,
             auto_history_section,
@@ -4010,7 +4034,8 @@ def build_demo() -> gr.Blocks:
                 parallel_env_button,
                 generate_button,
                 rerun_simulation_button,
-                random_input_button,
+                random_task_input_button,
+                random_scene_input_button,
                 reset_button,
                 language_button,
                 heading,
@@ -4063,8 +4088,8 @@ def build_demo() -> gr.Blocks:
                 previous_auto_video,
             ],
         )
-        random_input_button.click(
-            randomize_interact_input,
+        random_task_input_button.click(
+            randomize_interact_task_input,
             inputs=[run_mode, language],
             outputs=[
                 image_input,
@@ -4076,6 +4101,12 @@ def build_demo() -> gr.Blocks:
                 edited_model,
                 object_model,
             ],
+            queue=False,
+        )
+        random_scene_input_button.click(
+            randomize_interact_scene_input,
+            inputs=[run_mode, language],
+            outputs=[env_input],
             queue=False,
         )
         rerun_simulation_button.click(
