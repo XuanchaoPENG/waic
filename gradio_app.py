@@ -21,6 +21,7 @@ from random_input import IMAGE_DIR as AUTO_BASE_IMAGE_DIR
 from random_input import (
     auto_image_directories,
     available_auto_task_indices,
+    generate_auto_scene_description,
     generate_auto_text_input,
     get_prebuilt_scene_dir,
     parse_task_id,
@@ -113,6 +114,7 @@ BUTTON_LABELS = {
         "parallel_env": "Parallel Simulation",
         "rerun_simulation": "Run Task",
         "generate": "Generate",
+        "start": "Start",
         "random_input": "Random Task",
         "random_scene_input": "Random Scene",
         "reset": "Reset",
@@ -125,6 +127,7 @@ BUTTON_LABELS = {
         "parallel_env": "并行仿真",
         "rerun_simulation": "运行任务",
         "generate": "生成",
+        "start": "开始",
         "random_input": "随机任务",
         "random_scene_input": "随机场景",
         "reset": "重置",
@@ -318,6 +321,9 @@ class RuntimeState:
     auto_loop_active: bool = False
     auto_loop_token: str | None = None
     auto_round: int = 0
+    auto_scene_mode: str = SCENE_MODE_INITIAL
+    auto_parallel_env: bool = False
+    auto_robot_profile: str = DEFAULT_ROBOT_PROFILE
     language: str = LANGUAGE_EN
     process: subprocess.Popen[str] | None = None
     sim_process: subprocess.Popen[str] | None = None
@@ -331,6 +337,7 @@ class RuntimeState:
     input_scene_text: str = ""
     image_path: Path | None = None
     video_path: Path | None = None
+    last_sent_video_signature: tuple[str, int] | None = None
     lerobot_video_path: Path | None = None
     lerobot_dataset_path: Path | None = None
     previous_auto_image_path: Path | None = None
@@ -2332,8 +2339,6 @@ def run_generate(
         runtime.input_scene_text = env_text
         runtime.image_path = image_path
         runtime.submitted_input_revision += 1
-        if not preserve_previous_video:
-            runtime.video_path = None
         runtime.lerobot_video_path = None
         runtime.lerobot_dataset_path = None
         runtime.object_model_path = existing_object_preview_path
@@ -2449,6 +2454,9 @@ def start_auto_loop_state() -> str | None:
         runtime.auto_loop_active = True
         runtime.auto_loop_token = token
         runtime.auto_round = 0
+        runtime.auto_scene_mode = SCENE_MODE_INITIAL
+        runtime.auto_parallel_env = False
+        runtime.auto_robot_profile = DEFAULT_ROBOT_PROFILE
         runtime.phase_key = "received"
         runtime.status = "Auto loop starting."
         runtime.video_path = None
@@ -2482,6 +2490,9 @@ def finish_auto_loop(loop_token: str, status_text: str | None = None) -> None:
         runtime.auto_loop_active = False
         runtime.auto_loop_token = None
         runtime.auto_round = 0
+        runtime.auto_scene_mode = SCENE_MODE_INITIAL
+        runtime.auto_parallel_env = False
+        runtime.auto_robot_profile = DEFAULT_ROBOT_PROFILE
         if status_text is not None:
             runtime.status = status_text
 
@@ -2496,6 +2507,9 @@ def stop_auto_loop_if_running() -> bool:
         runtime.auto_loop_active = False
         runtime.auto_loop_token = None
         runtime.auto_round = 0
+        runtime.auto_scene_mode = SCENE_MODE_INITIAL
+        runtime.auto_parallel_env = False
+        runtime.auto_robot_profile = DEFAULT_ROBOT_PROFILE
         process = runtime.process
         sim_process = runtime.sim_process
         runtime.process = None
@@ -2602,6 +2616,16 @@ def run_generate_for_top_mode(
 
     with runtime_lock:
         runtime.language = language or LANGUAGE_EN
+
+    def set_auto_control_state(
+        scene_mode: str,
+        parallel_env: bool,
+        robot_profile: str | None,
+    ) -> None:
+        with runtime_lock:
+            runtime.auto_scene_mode = scene_mode
+            runtime.auto_parallel_env = parallel_env
+            runtime.auto_robot_profile = robot_profile or DEFAULT_ROBOT_PROFILE
 
     def run_auto_phase(
         phase_name: str,
@@ -2716,6 +2740,107 @@ def run_generate_for_top_mode(
         )
         return round_outcome
 
+    def run_auto_parallel_simulation(
+        base_image: str,
+        task_text: str,
+        scene_text: str,
+        *,
+        robot_profile: str | None,
+        update_previous_run: bool = False,
+    ):
+        with runtime_lock:
+            simulation_token = runtime.run_token
+            runtime.sim_started = False
+            runtime.sim_finished = False
+            runtime.sim_returncode = None
+            runtime.last_error = None
+            runtime.status = "Starting parallel simulation..."
+            runtime.log_lines.append("Auto phase: starting parallel simulation.")
+
+        simulation_error = launch_current_simulation(
+            simulation_token,
+            parallel_env=True,
+            robot_profile=robot_profile,
+            run_log_mode=RUN_LOG_MODE_AUTO,
+            task_description=task_text,
+            scene_description=scene_text,
+        )
+        if simulation_error is not None:
+            with runtime_lock:
+                runtime.phase_key = "failed"
+                runtime.status = f"Parallel simulation launch failed: {simulation_error}"
+                runtime.last_error = simulation_error
+                runtime.log_lines.append(runtime.status)
+            archive_run_log(
+                mode=RUN_LOG_MODE_AUTO,
+                task_description=task_text,
+                scene_description=scene_text,
+                outcome="simulation_launch_failed",
+            )
+            yield (
+                base_image,
+                task_text,
+                scene_text,
+                *ui_snapshot(),
+                *auto_history_snapshot(),
+            )
+            return "simulation_failed"
+
+        yield (
+            base_image,
+            task_text,
+            scene_text,
+            *ui_snapshot(extra_status="Parallel simulation started."),
+            *auto_history_snapshot(),
+        )
+        for snapshot in wait_for_current_simulation_to_exit(
+            loop_token,
+            base_image,
+            task_text,
+            scene_text,
+        ):
+            yield snapshot
+
+        if not auto_loop_is_active(loop_token):
+            archive_run_log(
+                mode=RUN_LOG_MODE_AUTO,
+                task_description=task_text,
+                scene_description=scene_text,
+                outcome="stopped",
+            )
+            return "stopped"
+
+        with runtime_lock:
+            simulation_completed = (
+                runtime.sim_started
+                and runtime.sim_finished
+                and runtime.sim_process is None
+            )
+            round_outcome = (
+                "completed" if simulation_completed else "simulation_failed"
+            )
+        log_path = archive_run_log(
+            mode=RUN_LOG_MODE_AUTO,
+            task_description=task_text,
+            scene_description=scene_text,
+            outcome=round_outcome,
+        )
+        if update_previous_run:
+            archived_video = archived_audience_video_path(log_path)
+            with runtime_lock:
+                runtime.previous_auto_image_path = Path(base_image)
+                runtime.previous_auto_task_text = runtime.task_text
+                runtime.previous_auto_video_path = archived_video or runtime.video_path
+                runtime.video_path = None
+        yield (
+            base_image,
+            task_text,
+            scene_text,
+            *ui_snapshot(extra_status=f"Parallel simulation: {round_outcome}."),
+            *auto_history_snapshot(),
+        )
+        return round_outcome
+
     while auto_loop_is_active(loop_token):
         auto_task = ""
         auto_scene = ""
@@ -2742,7 +2867,10 @@ def run_generate_for_top_mode(
         try:
             with runtime_lock:
                 selected_language = runtime.language
-            auto_input = generate_auto_text_input(language=selected_language)
+            auto_input = generate_auto_text_input(
+                language=selected_language,
+                include_scene=False,
+            )
         except Exception as exc:
             if not auto_loop_is_active(loop_token):
                 break
@@ -2768,7 +2896,6 @@ def run_generate_for_top_mode(
 
         base_image = auto_input.base_image_path.as_posix()
         auto_task = auto_input.task_description
-        auto_scene = auto_input.scene_description
         task_label = f"task{auto_input.task_index[0]}_{auto_input.task_index[1]}"
         with runtime_lock:
             runtime.task_text = format_current_task(auto_task, auto_scene)
@@ -2791,8 +2918,6 @@ def run_generate_for_top_mode(
                 runtime.log_lines.append(
                     f"Auto prebuilt scene: {auto_input.prebuilt_scene_dir}"
                 )
-            if auto_scene:
-                runtime.log_lines.append(f"Auto prompt2scene prompt: {auto_scene!r}")
         yield (
             base_image,
             auto_task,
@@ -2815,6 +2940,7 @@ def run_generate_for_top_mode(
         phase_results: list[str] = []
 
         phase_results.append("stopped")
+        set_auto_control_state(SCENE_MODE_INITIAL, False, robot_profile)
         phase_generator = run_auto_phase(
             "Initial generation",
             base_image,
@@ -2840,19 +2966,15 @@ def run_generate_for_top_mode(
             continue
 
         try:
-            if auto_scene:
-                auto_edit_input = generate_auto_text_input(language=selected_language)
-                auto_edit_scene = auto_scene
-            else:
-                auto_edit_input = generate_auto_text_input(
-                    language=selected_language,
-                    ensure_scene=True,
-                )
-                auto_edit_scene = auto_edit_input.scene_description
+            auto_edit_scene = generate_auto_scene_description(
+                task_index=auto_input.task_index,
+                language=selected_language,
+                ensure_scene=True,
+            )
         except Exception as exc:
             with runtime_lock:
                 runtime.phase_key = "failed"
-                runtime.status = f"Auto edit text generation failed: {exc}"
+                runtime.status = f"Auto scene description generation failed: {exc}"
                 runtime.last_error = str(exc)
                 runtime.log_lines.append(runtime.status)
             yield (
@@ -2871,10 +2993,11 @@ def run_generate_for_top_mode(
             continue
 
         phase_results.append("stopped")
+        set_auto_control_state(SCENE_MODE_EDIT, False, robot_profile)
         phase_generator = run_auto_phase(
             "Scene edit",
             base_image,
-            auto_edit_input.task_description,
+            auto_task,
             auto_edit_scene,
             scene_mode=SCENE_MODE_EDIT,
             parallel_env=False,
@@ -2894,41 +3017,13 @@ def run_generate_for_top_mode(
         if phase_results[1] == "pipeline_failed":
             continue
 
-        try:
-            auto_parallel_input = generate_auto_text_input(language=selected_language)
-        except Exception as exc:
-            with runtime_lock:
-                runtime.phase_key = "failed"
-                runtime.status = f"Auto parallel input generation failed: {exc}"
-                runtime.last_error = str(exc)
-                runtime.log_lines.append(runtime.status)
-            yield (
-                gr.update(),
-                gr.update(),
-                gr.update(),
-                *ui_snapshot(),
-                *auto_history_snapshot(),
-            )
-            archive_run_log(
-                mode=RUN_LOG_MODE_AUTO,
-                task_description=auto_task,
-                scene_description=auto_scene,
-                outcome="text_generation_failed",
-            )
-            continue
-
         phase_results.append("stopped")
-        phase_generator = run_auto_phase(
-            "Parallel simulation",
+        set_auto_control_state(SCENE_MODE_EDIT, True, robot_profile)
+        phase_generator = run_auto_parallel_simulation(
             base_image,
-            auto_parallel_input.task_description,
-            "",
-            scene_mode=SCENE_MODE_TASK_ONLY,
-            parallel_env=True,
+            auto_task,
+            auto_edit_scene,
             robot_profile=robot_profile,
-            force_initial=False,
-            preserve_previous_video=False,
-            update_previous_run=False,
         )
         try:
             while True:
@@ -2938,44 +3033,20 @@ def run_generate_for_top_mode(
 
         if phase_results[2] == "stopped":
             break
-        if phase_results[2] == "pipeline_failed":
-            continue
-
-        try:
-            auto_franka_input = generate_auto_text_input(language=selected_language)
-        except Exception as exc:
-            with runtime_lock:
-                runtime.phase_key = "failed"
-                runtime.status = f"Auto final input generation failed: {exc}"
-                runtime.last_error = str(exc)
-                runtime.log_lines.append(runtime.status)
-            yield (
-                gr.update(),
-                gr.update(),
-                gr.update(),
-                *ui_snapshot(),
-                *auto_history_snapshot(),
-            )
-            archive_run_log(
-                mode=RUN_LOG_MODE_AUTO,
-                task_description=auto_task,
-                scene_description=auto_scene,
-                outcome="text_generation_failed",
-            )
-            continue
 
         phase_results.append("stopped")
+        set_auto_control_state(SCENE_MODE_TASK_ONLY, False, ROBOT_PROFILE_FRANKA)
         phase_generator = run_auto_phase(
             "Task-only Franka",
             base_image,
-            auto_franka_input.task_description,
+            auto_task,
             "",
             scene_mode=SCENE_MODE_TASK_ONLY,
             parallel_env=False,
             robot_profile=ROBOT_PROFILE_FRANKA,
             force_initial=False,
             preserve_previous_video=False,
-            update_previous_run=True,
+            update_previous_run=False,
         )
         try:
             while True:
@@ -2984,6 +3055,26 @@ def run_generate_for_top_mode(
             phase_results[3] = str(exc.value)
 
         if phase_results[3] == "stopped":
+            break
+        if phase_results[3] == "pipeline_failed":
+            continue
+
+        phase_results.append("stopped")
+        set_auto_control_state(SCENE_MODE_TASK_ONLY, True, ROBOT_PROFILE_FRANKA)
+        phase_generator = run_auto_parallel_simulation(
+            base_image,
+            auto_task,
+            "",
+            robot_profile=ROBOT_PROFILE_FRANKA,
+            update_previous_run=True,
+        )
+        try:
+            while True:
+                yield next(phase_generator)
+        except StopIteration as exc:
+            phase_results[4] = str(exc.value)
+
+        if phase_results[4] == "stopped":
             break
 
         cleanup_errors = cleanup_auto_generated_artifacts()
@@ -3705,7 +3796,10 @@ def randomize_interact_task_input(run_mode: str | None, language: str | None):
             None,
             None,
         )
-    auto_input = generate_auto_text_input(language=language or LANGUAGE_EN)
+    auto_input = generate_auto_text_input(
+        language=language or LANGUAGE_EN,
+        include_scene=False,
+    )
     initial_preview = None
     if auto_input.prebuilt_scene_dir is not None:
         initial_preview = build_interact_random_initial_preview(
@@ -3729,11 +3823,11 @@ def randomize_interact_scene_input(run_mode: str | None, language: str | None):
     """Fill only the scene text in the Interact form."""
     if run_mode != TOP_MODE_INTERACT:
         return gr.update()
-    auto_input = generate_auto_text_input(
+    scene_description = generate_auto_scene_description(
         language=language or LANGUAGE_EN,
         ensure_scene=True,
     )
-    return gr.update(value=auto_input.scene_description, interactive=True)
+    return gr.update(value=scene_description, interactive=True)
 
 
 def clear_interact_prebuilt_scene() -> None:
@@ -3769,8 +3863,9 @@ def button_updates(
         gr.update(
             value=labels["parallel_env"],
             variant="primary" if is_parallel_env else "secondary",
+            interactive=not is_auto,
         ),
-        gr.update(value=labels["generate"]),
+        gr.update(value=labels["start"] if is_auto else labels["generate"]),
         gr.update(
             value=labels["rerun_simulation"],
             visible=is_interact,
@@ -3779,6 +3874,35 @@ def button_updates(
         gr.update(value=labels["random_input"], visible=is_interact),
         gr.update(value=labels["random_scene_input"], visible=is_interact),
         gr.update(value=labels["stop"] if is_auto else labels["reset"]),
+    )
+
+
+def auto_control_updates(
+    run_mode: str | None,
+    action_mode: str | None,
+) -> tuple[Any, Any, Any, str | None]:
+    if run_mode != TOP_MODE_AUTO:
+        return (
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+            gr.update(),
+            action_mode,
+        )
+
+    with runtime_lock:
+        scene_mode = runtime.auto_scene_mode
+        parallel_env = runtime.auto_parallel_env
+        robot_profile = runtime.auto_robot_profile
+        labels = BUTTON_LABELS.get(runtime.language, BUTTON_LABELS[LANGUAGE_EN])
+    return (
+        gr.update(value=scene_mode, interactive=False),
+        gr.update(value=robot_profile, interactive=False),
+        gr.update(
+            value=labels["parallel_env"],
+            variant="primary" if parallel_env else "secondary",
+            interactive=False,
+        ),
+        TOP_MODE_PARALLEL_ENV if parallel_env else None,
     )
 
 
@@ -3904,11 +4028,18 @@ def select_top_mode(
 def ui_snapshot(extra_status: str | None = None):
     with runtime_lock:
         phase = PHASES.get(runtime.phase_key, PHASES["idle"])
-        video_value = (
-            runtime.video_path.as_posix()
-            if runtime.video_path and runtime.video_path.is_file()
-            else None
-        )
+        video_value = None
+        video_signature = None
+        if runtime.video_path and runtime.video_path.is_file():
+            video_value = runtime.video_path.as_posix()
+            video_signature = (video_value, runtime.video_path.stat().st_mtime_ns)
+        if runtime.auto_loop_active:
+            video_update = video_value
+        elif video_signature != runtime.last_sent_video_signature:
+            runtime.last_sent_video_signature = video_signature
+            video_update = video_value
+        else:
+            video_update = gr.update()
         object_model_value = (
             runtime.object_model_path.as_posix()
             if runtime.object_model_path and runtime.object_model_path.is_file()
@@ -3932,7 +4063,7 @@ def ui_snapshot(extra_status: str | None = None):
         busy = runtime.is_busy
         last_error = runtime.last_error
     return (
-        video_value,
+        video_update,
         task_text,
         phase.progress,
         format_status(
@@ -4006,6 +4137,7 @@ def synced_ui_snapshot(
         ),
         *auto_history_snapshot(),
         submitted_input_revision,
+        *auto_control_updates(run_mode, action_mode),
     )
 
 
@@ -4384,6 +4516,10 @@ def build_demo() -> gr.Blocks:
                 previous_auto_task,
                 previous_auto_video,
                 last_seen_input_revision,
+                scene_mode,
+                robot_profile,
+                parallel_env_button,
+                action_mode,
             ],
             queue=False,
         )

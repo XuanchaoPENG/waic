@@ -412,12 +412,30 @@ def create_text_input(
     return " ".join(text_parts)
 
 
+def generate_auto_scene_description(
+    *,
+    rng: np.random.Generator | None = None,
+    task_index: tuple[int, int] | None = None,
+    language: str = "en",
+    ensure_scene: bool = False,
+) -> str:
+    rng = rng or np.random.default_rng()
+    task_index = task_index or random_task(rng)
+    return create_text_input(
+        task_index,
+        rng,
+        language=language,
+        min_background_objects=1 if ensure_scene else 0,
+    )
+
+
 def generate_auto_text_input(
     *,
     rng: np.random.Generator | None = None,
     task_index: tuple[int, int] | None = None,
     language: str = "en",
     ensure_scene: bool = False,
+    include_scene: bool = True,
 ) -> AutoInput:
     rng = rng or np.random.default_rng()
     task_index = task_index or random_task(rng)
@@ -433,11 +451,15 @@ def generate_auto_text_input(
         prebuilt_scene_dir=prebuilt_scene_dir,
         image_path=None,
         task_description=get_task_description(task_index, language=language),
-        scene_description=create_text_input(
-            task_index,
-            rng,
-            language=language,
-            min_background_objects=1 if ensure_scene else 0,
+        scene_description=(
+            generate_auto_scene_description(
+                rng=rng,
+                task_index=task_index,
+                language=language,
+                ensure_scene=ensure_scene,
+            )
+            if include_scene
+            else ""
         ),
     )
 
