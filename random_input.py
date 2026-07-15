@@ -370,14 +370,17 @@ def create_text_input(
     rng: np.random.Generator,
     *,
     language: str = "en",
+    min_background_objects: int = 0,
 ) -> str:
     text_parts: list[str] = []
-    if task_index[0] == 5:
+    if task_index[0] == 5 and min_background_objects == 0:
         return ""
 
     mu, sigma = 1.0, 1.0
     raw = rng.normal(loc=mu, scale=sigma)
     num_background_objects = int(np.clip(np.round(raw), 0, 3))
+    if min_background_objects > 0:
+        num_background_objects = max(num_background_objects, min_background_objects)
 
     if num_background_objects == 0:
         return ""
@@ -414,6 +417,7 @@ def generate_auto_text_input(
     rng: np.random.Generator | None = None,
     task_index: tuple[int, int] | None = None,
     language: str = "en",
+    ensure_scene: bool = False,
 ) -> AutoInput:
     rng = rng or np.random.default_rng()
     task_index = task_index or random_task(rng)
@@ -429,7 +433,12 @@ def generate_auto_text_input(
         prebuilt_scene_dir=prebuilt_scene_dir,
         image_path=None,
         task_description=get_task_description(task_index, language=language),
-        scene_description=create_text_input(task_index, rng, language=language),
+        scene_description=create_text_input(
+            task_index,
+            rng,
+            language=language,
+            min_background_objects=1 if ensure_scene else 0,
+        ),
     )
 
 

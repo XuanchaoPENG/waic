@@ -3536,7 +3536,10 @@ def randomize_interact_scene_input(run_mode: str | None, language: str | None):
     """Fill only the scene text in the Interact form."""
     if run_mode != TOP_MODE_INTERACT:
         return gr.update()
-    auto_input = generate_auto_text_input(language=language or LANGUAGE_EN)
+    auto_input = generate_auto_text_input(
+        language=language or LANGUAGE_EN,
+        ensure_scene=True,
+    )
     return gr.update(value=auto_input.scene_description, interactive=True)
 
 
