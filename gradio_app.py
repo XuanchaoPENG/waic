@@ -704,8 +704,6 @@ def build_config_command_for_paths(
         SCENE_ID,
         "--task_description",
         task_text,
-        "--target_body_scale",
-        "1.3",
         "--overwrite",
     ]
     profile = robot_profile_cli_value(robot_profile)
@@ -1401,7 +1399,7 @@ def build_run_agent_command(
     ]
     command.extend(["--num_envs", "9" if parallel_env else "1"])
     if parallel_env:
-        command.extend(["--arena_space", "2.0", "--filter_dataset_saving"])
+        command.extend(["--arena_space", "2.2", "--filter_dataset_saving"])
     profile = robot_profile_cli_value(robot_profile)
     if profile and run_agent_cli_supports_robot_profile():
         command.extend(["--robot-profile", profile])

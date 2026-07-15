@@ -288,7 +288,6 @@ python -m embodichain.gen_sim.action_agent_pipeline.cli.generate_action_agent_co
   --output_dir "gym_project/action_agent_pipeline/configs/current" \
   --task_name "current" \
   --task_description "<Task description>" \
-  --target_body_scale 1.3 \
   --overwrite
 ```
 
