@@ -704,8 +704,6 @@ def build_config_command_for_paths(
         SCENE_ID,
         "--task_description",
         task_text,
-        "--target_body_scale",
-        "1.3",
         "--overwrite",
     ]
     profile = robot_profile_cli_value(robot_profile)
