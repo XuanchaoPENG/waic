@@ -306,6 +306,20 @@ PHASES = {
 }
 
 
+TIMING_PHASE_LABELS = {
+    "relations": "Segmentation / spatial relations",
+    "asset_generation": "Object generation",
+    "gym_export": "Scene generation / export",
+    "action_graph_execution": "Action graph execution",
+}
+TIMING_PHASE_ORDER = (
+    "relations",
+    "asset_generation",
+    "gym_export",
+    "action_graph_execution",
+)
+
+
 @dataclass
 class RuntimeState:
     is_busy: bool = False
@@ -338,10 +352,124 @@ class RuntimeState:
     edited_scene_model_path: Path | None = None
     last_error: str | None = None
     log_lines: deque[str] = field(default_factory=deque)
+    timing_started_ns: int | None = None
+    current_timing_phase_key: str | None = None
+    current_timing_phase_started_ns: int | None = None
+    phase_durations_ns: dict[str, int] = field(default_factory=dict)
+    simulation_started_monotonic_ns: int | None = None
+    simulation_duration_ns: int | None = None
 
 
 runtime = RuntimeState()
 runtime_lock = threading.Lock()
+
+
+def clear_run_timing_locked() -> None:
+    runtime.timing_started_ns = None
+    runtime.current_timing_phase_key = None
+    runtime.current_timing_phase_started_ns = None
+    runtime.phase_durations_ns.clear()
+    runtime.simulation_started_monotonic_ns = None
+    runtime.simulation_duration_ns = None
+
+
+def start_run_timing_locked(phase_key: str) -> None:
+    now_ns = time.monotonic_ns()
+    runtime.timing_started_ns = now_ns
+    runtime.current_timing_phase_key = phase_key
+    runtime.current_timing_phase_started_ns = now_ns
+    runtime.phase_durations_ns.clear()
+    runtime.simulation_started_monotonic_ns = None
+    runtime.simulation_duration_ns = None
+
+
+def record_phase_transition_locked(new_phase_key: str) -> None:
+    current_key = runtime.current_timing_phase_key
+    current_started_ns = runtime.current_timing_phase_started_ns
+    now_ns = time.monotonic_ns()
+    if current_key is None or current_started_ns is None:
+        runtime.timing_started_ns = runtime.timing_started_ns or now_ns
+        runtime.current_timing_phase_key = new_phase_key
+        runtime.current_timing_phase_started_ns = now_ns
+        return
+    if new_phase_key == current_key:
+        return
+    elapsed_ns = max(0, now_ns - current_started_ns)
+    runtime.phase_durations_ns[current_key] = (
+        runtime.phase_durations_ns.get(current_key, 0) + elapsed_ns
+    )
+    runtime.current_timing_phase_key = new_phase_key
+    runtime.current_timing_phase_started_ns = now_ns
+
+
+def set_runtime_phase_locked(new_phase_key: str) -> None:
+    record_phase_transition_locked(new_phase_key)
+    runtime.phase_key = new_phase_key
+
+
+def record_simulation_started_locked() -> None:
+    runtime.simulation_started_monotonic_ns = time.monotonic_ns()
+    runtime.simulation_duration_ns = None
+
+
+def record_simulation_finished_locked() -> None:
+    started_ns = runtime.simulation_started_monotonic_ns
+    if started_ns is None:
+        return
+    runtime.simulation_duration_ns = max(0, time.monotonic_ns() - started_ns)
+    runtime.simulation_started_monotonic_ns = None
+
+
+def snapshot_timing_locked() -> tuple[dict[str, int], int | None]:
+    durations = dict(runtime.phase_durations_ns)
+    current_key = runtime.current_timing_phase_key
+    current_started_ns = runtime.current_timing_phase_started_ns
+    if (
+        current_key
+        and current_started_ns is not None
+        and current_key not in {"complete", "failed", "idle"}
+    ):
+        durations[current_key] = durations.get(current_key, 0) + max(
+            0,
+            time.monotonic_ns() - current_started_ns,
+        )
+
+    simulation_duration_ns = runtime.simulation_duration_ns
+    if (
+        simulation_duration_ns is None
+        and runtime.simulation_started_monotonic_ns is not None
+    ):
+        simulation_duration_ns = max(
+            0,
+            time.monotonic_ns() - runtime.simulation_started_monotonic_ns,
+        )
+    return durations, simulation_duration_ns
+
+
+def format_duration_ns(duration_ns: int) -> str:
+    seconds = duration_ns / 1_000_000_000
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    minutes = int(seconds // 60)
+    remainder = seconds - minutes * 60
+    return f"{minutes}m {remainder:05.2f}s"
+
+
+def format_timing_lines(
+    phase_durations_ns: dict[str, int],
+    simulation_duration_ns: int | None,
+) -> list[str]:
+    timing_values = dict(phase_durations_ns)
+    if simulation_duration_ns is not None:
+        timing_values["action_graph_execution"] = simulation_duration_ns
+
+    lines: list[str] = []
+    for key in TIMING_PHASE_ORDER:
+        label = TIMING_PHASE_LABELS[key]
+        duration_ns = timing_values.get(key)
+        value = format_duration_ns(duration_ns) if duration_ns is not None else "skipped"
+        lines.append(f"- {label}: {value}")
+    return lines
 
 
 @dataclass(frozen=True)
@@ -463,6 +591,7 @@ def reset_current_scene() -> list[str]:
         runtime.edited_scene_model_path = None
         runtime.last_error = None
         runtime.log_lines.clear()
+        clear_run_timing_locked()
 
     if process is not None:
         terminate_process_group(process)
@@ -736,6 +865,7 @@ def archive_run_log(
         status_text = runtime.status
         last_error = runtime.last_error
         runtime_video = runtime.video_path
+        timing_durations, simulation_duration = snapshot_timing_locked()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = make_next_log_archive_dir()
@@ -783,6 +913,10 @@ def archive_run_log(
             "```text",
             "\n".join(run_logs) if run_logs else "(no logs)",
             "```",
+            "",
+            "## Timing",
+            "",
+            *format_timing_lines(timing_durations, simulation_duration),
             "",
         ]
     )
@@ -2237,6 +2371,7 @@ def run_generate(
             runtime.status = f"Input error: {exc}"
             runtime.last_error = str(exc)
             runtime.log_lines.clear()
+            clear_run_timing_locked()
             runtime.log_lines.append(runtime.status)
         if run_log_mode == RUN_LOG_MODE_INTERACT:
             archive_run_log(
@@ -2317,6 +2452,7 @@ def run_generate(
         runtime.sim_finished = False
         runtime.sim_returncode = None
         runtime.log_lines.clear()
+        clear_run_timing_locked()
         runtime.log_lines.append("$ " + " ".join(command))
     yield ui_snapshot()
 
@@ -2371,6 +2507,7 @@ def run_generate(
             terminate_process_group(process)
             return
         runtime.process = process
+        start_run_timing_locked("started")
         runtime.phase_key = "started"
         runtime.status = "Local pipeline started."
     reader.start()
@@ -2408,6 +2545,7 @@ def start_auto_loop_state() -> str | None:
             runtime.status = message
             runtime.last_error = message
             runtime.log_lines.clear()
+            clear_run_timing_locked()
             runtime.log_lines.append(message)
             return None
 
@@ -2432,6 +2570,7 @@ def start_auto_loop_state() -> str | None:
         runtime.lerobot_dataset_path = None
         runtime.last_error = None
         runtime.log_lines.clear()
+        clear_run_timing_locked()
 
     if process is not None:
         terminate_process_group(process)
@@ -2497,6 +2636,7 @@ def stop_auto_loop_if_running() -> bool:
         runtime.edited_scene_model_path = None
         runtime.last_error = None
         runtime.log_lines.clear()
+        clear_run_timing_locked()
 
     if process is not None:
         terminate_process_group(process)
@@ -2701,6 +2841,7 @@ def run_generate_for_top_mode(
             runtime.sim_returncode = None
             runtime.last_error = None
             runtime.status = "Starting parallel simulation..."
+            clear_run_timing_locked()
             runtime.log_lines.append("Auto phase: starting parallel simulation.")
 
         simulation_error = launch_current_simulation(
@@ -2790,6 +2931,7 @@ def run_generate_for_top_mode(
             runtime.sim_finished = False
             runtime.sim_returncode = None
             runtime.log_lines.clear()
+            clear_run_timing_locked()
             runtime.log_lines.append(f"Auto round {auto_round} started.")
 
         cleanup_errors = cleanup_auto_generated_artifacts()
@@ -2814,6 +2956,7 @@ def run_generate_for_top_mode(
                 runtime.phase_key = "failed"
                 runtime.status = f"Auto text generation failed: {exc}"
                 runtime.last_error = str(exc)
+                clear_run_timing_locked()
                 runtime.log_lines.append(runtime.status)
             yield (
                 gr.update(),
@@ -2908,6 +3051,7 @@ def run_generate_for_top_mode(
                 runtime.phase_key = "failed"
                 runtime.status = f"Auto scene description generation failed: {exc}"
                 runtime.last_error = str(exc)
+                clear_run_timing_locked()
                 runtime.log_lines.append(runtime.status)
             yield (
                 gr.update(),
@@ -3045,11 +3189,13 @@ def supervise_pipeline(
                 with runtime_lock:
                     for line in drained:
                         runtime.log_lines.append(line)
-                        runtime.phase_key = update_phase_from_log(line, runtime.phase_key)
+                        set_runtime_phase_locked(
+                            update_phase_from_log(line, runtime.phase_key)
+                        )
 
             with runtime_lock:
                 detected_key = detect_phase_from_files(runtime.phase_key, stage)
-                runtime.phase_key = detected_key
+                set_runtime_phase_locked(detected_key)
                 if detected_key in PHASES and runtime.phase_key != "failed":
                     runtime.status = PHASES[detected_key].label + "."
 
@@ -3071,11 +3217,13 @@ def supervise_pipeline(
                     )
                     with runtime_lock:
                         runtime.object_model_path = object_preview_path
-                        runtime.phase_key = _choose_later_phase(
-                            runtime.phase_key,
-                            PHASES.get(runtime.phase_key, PHASES["idle"]).progress,
-                            "asset_generation",
-                        )[0]
+                        set_runtime_phase_locked(
+                            _choose_later_phase(
+                                runtime.phase_key,
+                                PHASES.get(runtime.phase_key, PHASES["idle"]).progress,
+                                "asset_generation",
+                            )[0]
+                        )
                         runtime.status = (
                             f"Generated object GLB preview loaded "
                             f"({len(glb_paths)} files)."
@@ -3107,7 +3255,7 @@ def supervise_pipeline(
                             runtime.edited_scene_model_path = scene_path
                         else:
                             runtime.scene_model_path = scene_path
-                        runtime.phase_key = "preview"
+                        set_runtime_phase_locked("preview")
                         runtime.status = "3D preview loaded."
                         runtime.last_error = None
                 except Exception as exc:
@@ -3125,7 +3273,9 @@ def supervise_pipeline(
         with runtime_lock:
             for line in drained:
                 runtime.log_lines.append(line)
-                runtime.phase_key = update_phase_from_log(line, runtime.phase_key)
+                set_runtime_phase_locked(
+                    update_phase_from_log(line, runtime.phase_key)
+                )
 
         glb_paths = collect_generated_object_glbs(stage)
         if (
@@ -3163,7 +3313,7 @@ def supervise_pipeline(
                 with runtime_lock:
                     runtime.scene_model_path = scene_path
                     runtime.edited_scene_model_path = None
-                    runtime.phase_key = "preview"
+                    set_runtime_phase_locked("preview")
                     runtime.status = "3D preview loaded."
                     runtime.last_error = None
             except Exception as exc:
@@ -3188,7 +3338,7 @@ def supervise_pipeline(
                         runtime.edited_scene_model_path = scene_path
                     else:
                         runtime.scene_model_path = scene_path
-                    runtime.phase_key = "preview"
+                    set_runtime_phase_locked("preview")
                     runtime.status = "3D preview loaded."
                     runtime.last_error = None
             except Exception as exc:
@@ -3306,7 +3456,7 @@ def supervise_pipeline(
             runtime.is_busy = False
             runtime.process = None
             if pipeline_succeeded and not promotion_error:
-                runtime.phase_key = "complete"
+                set_runtime_phase_locked("complete")
                 runtime.status = "Pipeline completed successfully."
                 runtime.task_text = display_task_text
                 runtime.image_path = IMAGE_PATH if IMAGE_PATH.is_file() else None
@@ -3334,22 +3484,22 @@ def supervise_pipeline(
                     runtime.status += "\nDexsim launch failed; Gradio preview is still available."
                     runtime.last_error = simulation_error
             elif process.returncode == 0 and not pipeline_output_ready:
-                runtime.phase_key = "failed"
+                set_runtime_phase_locked("failed")
                 runtime.status = f"Pipeline ended without {missing_output_name}."
                 runtime.last_error = runtime.status
                 archive_outcome = "pipeline_output_missing"
             elif scene_build_error:
-                runtime.phase_key = "failed"
+                set_runtime_phase_locked("failed")
                 runtime.status = f"3D preview failed: {scene_build_error}"
                 runtime.last_error = scene_build_error
                 archive_outcome = "preview_failed"
             elif promotion_error:
-                runtime.phase_key = "failed"
+                set_runtime_phase_locked("failed")
                 runtime.status = f"Scene promotion failed: {promotion_error}"
                 runtime.last_error = promotion_error
                 archive_outcome = "promotion_failed"
             else:
-                runtime.phase_key = "failed"
+                set_runtime_phase_locked("failed")
                 runtime.status = f"Pipeline failed with return code {process.returncode}."
                 runtime.last_error = runtime.status
                 archive_outcome = "pipeline_failed"
@@ -3374,7 +3524,7 @@ def supervise_pipeline(
             if runtime.run_token == token:
                 runtime.is_busy = False
                 runtime.process = None
-                runtime.phase_key = "failed"
+                set_runtime_phase_locked("failed")
                 runtime.status = f"Pipeline supervision failed: {exc}"
                 runtime.last_error = str(exc)
                 runtime.log_lines.append(runtime.status)
@@ -3444,6 +3594,7 @@ def launch_current_simulation(
             runtime.sim_started = True
             runtime.sim_finished = False
             runtime.sim_returncode = None
+            record_simulation_started_locked()
             runtime.log_lines.append("$ " + " ".join(command))
 
     if stale:
@@ -3491,6 +3642,7 @@ def monitor_simulation(
     with runtime_lock:
         if runtime.run_token != token or runtime.sim_process is not process:
             return
+        record_simulation_finished_locked()
         runtime.sim_process = None
         runtime.sim_finished = True
         runtime.sim_returncode = process.returncode
@@ -3684,6 +3836,7 @@ def rerun_current_simulation(
         runtime.sim_finished = False
         runtime.sim_returncode = None
         runtime.last_error = None
+        clear_run_timing_locked()
         runtime.log_lines.append("Starting Dexsim rerun (run_agent only).")
 
     simulation_error = launch_current_simulation(

@@ -11,7 +11,7 @@ import numpy as np
 
 
 EMBODICHAIN_ROOT = Path(
-    os.environ.get("EMBODICHAIN_ROOT", "~/Documents/Projects/prompt2scene/EmbodiChain")
+    os.environ.get("EMBODICHAIN_ROOT", "/home/dex/桌面/EmbodiChain")
 ).expanduser()
 APP_ROOT = Path(__file__).resolve().parent
 IMAGE_DIR = Path(
