@@ -140,7 +140,7 @@ UI_TEXT = {
         "heading": "# Generative Simulation User Interface",
         "instruction": (
             "Upload one image, enter one task, then EmbodiChain "
-            "will generate what you want."
+            "will generate simulation data what you want."
         ),
         "robot": "Robot",
         "input_image": "Input image",
@@ -162,7 +162,7 @@ UI_TEXT = {
     },
     LANGUAGE_ZH: {
         "heading": "# 生成式仿真用户界面",
-        "instruction": "上传一张图片，输入一个任务，EmbodiChain 将生成所需的仿真。",
+        "instruction": "上传一张图片，输入一个任务，EmbodiChain 将生成所需的仿真数据。",
         "robot": "机器人",
         "input_image": "输入图像",
         "task_description": "任务描述",
