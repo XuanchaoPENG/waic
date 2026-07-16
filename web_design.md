@@ -14,7 +14,7 @@
 - promote 时会把旧 `current` 临时移动到 `_gradio_replaced_<token>`，失败时尝试回滚。
 - 编辑模式和仅修改任务模式都直接基于已有 `current` 操作。
 - pipeline 命令都带 `--skip-run-agent`；pipeline 成功后 Gradio 再单独启动 dexsim/run-agent。
-- Auto 模式是连续循环：随机选择本地预置图片和任务，强制运行初始生成，等待 dexsim/run-agent 退出，归档日志和视频，清理本轮生成内容，然后进入下一轮。
+- Auto 模式是连续循环：随机选择本地预置图片、预置 clean scene 和任务，基于预置 scene 生成/编辑当前场景，等待 dexsim/run-agent 退出，归档日志和视频，清理本轮生成内容，然后进入下一轮。
 - Reset 是手动模式的全局中断和清理入口；Auto 模式下同一个按钮显示为 Stop，只停止当前 loop 和进程，不做 Reset 的全量清理。
 
 Gradio 启动方式：
@@ -65,15 +65,15 @@ GRADIO_ANALYTICS_ENABLED=False
 
 说明和机器人：
   instruction 文案
-  Robot: Franka / UR5
+  Robot: Franka / UR5 / UR10
 
 输入区：
   Input image
   Task description
   Scene description
   Generation mode: Initial generation / Edit current scene / Change task only
-  Random material
   Generate
+  Run Task
   Random Input
   Reset / Stop
 
@@ -103,6 +103,7 @@ Auto 历史区：
 - Robot 默认选择 `UR5`。
 - `Interact` 按钮为 primary。
 - `Reset` 按钮显示为 Reset。
+- `Run Task` 按钮仅 Interact 模式显示；只有当前 `fast_gym_config.json` 和 `agent_config.json` 都存在、且没有 pipeline/dexsim 正在运行时可点击。
 - Auto 历史区默认隐藏。
 
 顶部按钮含义：
@@ -116,12 +117,13 @@ Robot 单选：
 
 - `UR5`：pipeline 追加 `--robot-profile dual_ur5`。
 - `Franka`：pipeline 追加 `--robot-profile franka`。
-- dexsim/run-agent 当前不接收 robot profile 参数，只使用生成好的 config。
+- `UR10`：pipeline 追加 `--robot-profile dual_ur10`。
+- dexsim/run-agent 启动前会通过 `run_agent --help` 检测是否支持 `--robot-profile`；支持时同样追加对应 robot profile，不支持时只使用生成好的 config。
 
 Parallel Simulation 打开时，dexsim/run-agent 追加：
 
 ```bash
---num_envs 9 --arena_space 2.5 --filter_dataset_saving
+--num_envs 9 --arena_space 2.0 --filter_dataset_saving
 ```
 
 并且视频预览标签从 `LeRobot Data Preview` 切换为 `Parallel Env Data Preview`。
@@ -132,7 +134,7 @@ Parallel Simulation 打开时，dexsim/run-agent 追加：
 
 手动模式由 `Interact` 进入，也可以叠加 `Parallel Simulation` 和 Robot 选择。
 
-`Random Input` 仅在 Interact 模式下显示。点击后会从可用本地模板中随机选择一张输入图，填写对应任务描述和随机场景描述，并把 `Generation mode` 设置为 `Initial generation`。它不会直接启动 pipeline，仍需点击 `Generate`。随机任务和场景描述遵循页面当前语言。
+`Random Input` 仅在 Interact 模式下显示。点击后会从可用本地模板中随机选择一张输入图、对应任务描述、随机场景描述和预置 clean scene，并把 `Generation mode` 设置为 `Initial generation`。它不会直接启动 pipeline，仍需点击 `Generate`。随机任务和场景描述遵循页面当前语言；如果存在预置 scene，会立即在左侧 3D 预览中显示预置初始场景。
 
 输入：
 
@@ -140,13 +142,21 @@ Parallel Simulation 打开时，dexsim/run-agent 追加：
 - `Task description`：所有模式都必填，传给 action-agent。
 - `Scene description`：初始生成时作为 Prompt2Scene 场景提示；编辑时作为对当前场景的编辑提示；仅修改任务模式不可编辑。
 - `Generation mode`：显式选择 `Initial generation`、`Edit current scene` 或 `Change task only`，不再根据 Scene description 是否为空推断模式。
-- `Random material`：独立开关，不与 Generation mode 三个选项互斥；选中时在 Prompt2Scene/action config 模板命令中追加 `--load-template-material`。
+
+模式切换时的输入可编辑性来自 `scene_mode_input_updates()`：
+
+- `Edit current scene` 会让 `Task description` 变为不可编辑，但运行时仍要求 task 文本非空。
+- `Change task only` 会让 `Scene description` 变为不可编辑。
+- 上传新图片会清空 `Random Input` 记录的预置 scene。
 
 模式规则：
 
 - `Initial generation`：需要 Input image；可选 Scene description 会追加到初始 Prompt2Scene 命令。
-- `Edit current scene`：需要已有 current scene state、current config 和 Scene description；不要求重新上传图片，图片输入不可编辑。
+- `Edit current scene`：需要已有 current scene state、current config 和 Scene description；不要求重新上传图片。
 - `Change task only`：需要已有 `current/gym_export/gym_config.json`；保留当前场景，只重新生成 action-agent config，Scene description 不可编辑。
+- `Random Input` 选出的预置 scene 是特殊加速路径：会先复制预置 clean scene 到 staging。如果 Scene description 非空，会在 staging 上执行 scene edit；如果为空，只基于预置 gym export 重新生成 action-agent config。成功后仍会 promote 到正式 `current`。
+
+`Run Task` 只在 Interact 模式下可用，用于已有 `current` config 的 dexsim/run-agent 重跑。它不启动 Prompt2Scene pipeline，也不重新生成 action-agent config。
 
 ### Auto 模式
 
@@ -161,25 +171,19 @@ random_input.generate_auto_text_input(language=<当前语言>)
 ```text
 task_index
 base_image_path
+prebuilt_scene_dir
 task_description
 scene_description
 ```
 
-Auto 每轮都强制走 initial pipeline：
+Auto 每轮调用 `run_generate(..., force_initial=True, scene_mode=initial)`，但因为 `generate_auto_text_input()` 一定返回 `prebuilt_scene_dir`，实际分支是：
 
-```python
-run_generate(
-    base_image,
-    auto_task,
-    auto_scene,
-    force_initial=True,
-    scene_mode=SCENE_MODE_INITIAL,
-)
-```
+- 先把预置 clean scene 复制到 staging。
+- 如果 `auto_scene` 非空，对 staging 执行 scene edit。
+- 如果 `auto_scene` 为空，只基于 staging 的 `gym_export` 重新生成 action-agent config。
+- 成功后把 staging promote 到正式 `current`。
 
-即使 `auto_scene` 非空，也不会进入编辑模式，而是作为 `--prompt2scene-prompt` 传给初始生成命令。
-
-当前 Gradio Auto loop 不调用 `random_input.generate_auto_image()`，也不调用 Ark/Doubao 图片生成接口；它只使用本地预置图片。Auto 只从实际存在的 `task<task>_<sub_task>.png` 中选择；若没有任何可用输入图，会在启动前报错并停止。
+当前 Gradio Auto loop 不调用 `random_input.generate_auto_image()`，也不调用 Ark/Doubao 图片生成接口；它只使用本地预置图片和预置 clean scene。Auto 只从实际存在的 `task<task>_<sub_task>.png` 且存在对应 clean scene 的任务中选择；若没有任何可用任务，会在启动前报错并停止。
 
 Auto 图片目录来自 `random_input.py`：
 
@@ -187,18 +191,33 @@ Auto 图片目录来自 `random_input.py`：
 AUTO_IMAGE_DIR 显式设置时：
   <AUTO_IMAGE_DIR>
 
-AUTO_IMAGE_DIR 未设置时，按顺序查找：
-  <EMBODICHAIN_ROOT>/gym_project/action_agent_pipeline/auto_images
-  <EMBODICHAIN_ROOT>/gym_project/action_agent_pipeline/baseline_image_input
+AUTO_IMAGE_DIR 未设置时，按顺序查找 random_input.EMBODICHAIN_ROOT 下：
+  <random_input.EMBODICHAIN_ROOT>/gym_project/action_agent_pipeline/auto_images
+  <random_input.EMBODICHAIN_ROOT>/gym_project/action_agent_pipeline/baseline_image_input
 ```
 
-注意第一个默认路径在代码中是 `action_agent_pipeline`，不是 `action_agent_pipeline`。
+`random_input.EMBODICHAIN_ROOT` 也读取环境变量 `EMBODICHAIN_ROOT`；如果未设置，它的默认值是 `~/Documents/Projects/prompt2scene/EmbodiChain`，与 `gradio_app.py` 内部默认值不同。因此生产运行时建议显式设置 `EMBODICHAIN_ROOT`。
 
-任务索引范围：
+预置 clean scene 目录来自 `random_input.py`：
 
 ```text
-task:     0..4
-sub_task: 0..3
+AUTO_PREBUILT_SCENE_DIR 显式设置时：
+  <AUTO_PREBUILT_SCENE_DIR>
+
+AUTO_PREBUILT_SCENE_DIR 未设置时：
+  <waic repo>/scenes
+```
+
+Auto 可用任务必须同时满足：输入图存在，且 `AUTO_PREBUILT_SCENE_DIR/task<task>_<sub_task>` 目录存在。
+
+当前配置的任务索引：
+
+```text
+task0_0 task0_1 task0_2 task0_3
+task1_0 task1_1 task1_2 task1_3
+task2_1 task2_2 task2_3 task2_4
+task3_0 task3_1 task3_2 task3_3
+task4_0 task4_1 task4_2 task4_3
 ```
 
 每轮 dexsim/run-agent 结束后，页面会把本轮输入图、完整任务文本和归档视频放入 `Previous Auto Run` 区域。该区域会在下一轮生成期间继续显示，并在切换回 Interact 时隐藏。
@@ -222,12 +241,6 @@ python -m embodichain.gen_sim.action_agent_pipeline.cli.run_agent_pipeline \
   --skip-run-agent
 ```
 
-选中 `Random material` 时追加：
-
-```bash
-  --load-template-material
-```
-
 如果选择了 Robot，会追加：
 
 ```bash
@@ -240,11 +253,54 @@ python -m embodichain.gen_sim.action_agent_pipeline.cli.run_agent_pipeline \
 --robot-profile franka
 ```
 
+或：
+
+```bash
+--robot-profile dual_ur10
+```
+
 如果传入 `Scene description`，会追加：
 
 ```bash
 --prompt2scene-prompt "<Scene description>"
 ```
+
+当前 UI 路径中 `load_template_material=False`，不会从页面追加 `--load-template-material`。
+
+### 预置 scene config 生成命令
+
+`Random Input` 或 Auto 命中预置 clean scene 且 `Scene description` 为空时，会先把预置 scene 复制到 staging，再只生成 action-agent config：
+
+```bash
+python -m embodichain.gen_sim.action_agent_pipeline.cli.generate_action_agent_config \
+  --gym_project "gym_project/_gradio_pending_<token>/gym_export" \
+  --output_dir "gym_project/action_agent_pipeline/configs/_gradio_pending_<token>" \
+  --task_name "current" \
+  --task_description "<Task description>" \
+  --target_body_scale 1.3 \
+  --overwrite
+```
+
+Robot 选择同样会追加 `--robot-profile franka|dual_ur5|dual_ur10`。
+
+### 预置 scene 编辑命令
+
+`Random Input` 或 Auto 命中预置 clean scene 且 `Scene description` 非空时，会先把预置 scene 复制到 staging，再在 staging 上执行编辑：
+
+```bash
+python -m embodichain.gen_sim.action_agent_pipeline.cli.run_agent_pipeline \
+  --use-prompt2scene \
+  --prompt2scene-output-root "gym_project/_gradio_pending_<token>" \
+  --prompt2scene-prompt "<Scene description>" \
+  --config-output-dir "gym_project/action_agent_pipeline/configs/_gradio_pending_<token>" \
+  --task_name "current" \
+  --task_description "<Task description>" \
+  --overwrite-config \
+  --regenerate \
+  --skip-run-agent
+```
+
+Robot 选择同样会追加 `--robot-profile franka|dual_ur5|dual_ur10`。
 
 ### 编辑命令
 
@@ -270,7 +326,7 @@ python -m embodichain.gen_sim.action_agent_pipeline.cli.run_agent_pipeline \
   --skip-run-agent
 ```
 
-同样会根据 Robot 追加 `--robot-profile dual_ur5` 或 `--robot-profile franka`。
+同样会根据 Robot 追加 `--robot-profile franka|dual_ur5|dual_ur10`。
 
 ### 仅修改任务命令
 
@@ -292,13 +348,7 @@ python -m embodichain.gen_sim.action_agent_pipeline.cli.generate_action_agent_co
   --overwrite
 ```
 
-选中 `Random material` 时追加：
-
-```bash
-  --load-template-material
-```
-
-同样会根据 Robot 追加 `--robot-profile dual_ur5` 或 `--robot-profile franka`。
+同样会根据 Robot 追加 `--robot-profile franka|dual_ur5|dual_ur10`。
 
 ### dexsim/run-agent 命令
 
@@ -310,14 +360,21 @@ python -m embodichain.gen_sim.action_agent_pipeline.cli.run_agent \
   --gym_config "<EMBODICHAIN_ROOT>/gym_project/action_agent_pipeline/configs/current/fast_gym_config.json" \
   --agent_config "<EMBODICHAIN_ROOT>/gym_project/action_agent_pipeline/configs/current/agent_config.json" \
   --regenerate \
-  --renderer hybrid
+  --renderer fast-rt \
+  --num_envs 1
 ```
 
-Parallel Simulation 打开时追加：
+Parallel Simulation 打开时 `--num_envs` 改为 9，并追加：
 
 ```bash
---num_envs 9 --arena_space 2.5 --filter_dataset_saving
+--num_envs 9 --arena_space 2.0 --filter_dataset_saving
 ```
+
+注意实现是按模式追加 `--num_envs 9` 或 `--num_envs 1`，并行模式下再追加 `--arena_space 2.0 --filter_dataset_saving`。如果 run-agent `--help` 中包含 `--robot-profile`，还会追加当前 Robot 对应的 profile。
+
+### Run Task 重跑命令
+
+`Run Task` 复用同一个 dexsim/run-agent 命令，只要求当前 `fast_gym_config.json` 和 `agent_config.json` 已存在。它不会运行 Prompt2Scene pipeline，也不会改动 scene/config，主要用于用当前配置重新采样一轮 dexsim 视频和 LeRobot dataset。
 
 ## 输出文件
 
@@ -354,6 +411,10 @@ Gradio 预览缓存：
   object_preview.glb
   scene_manifest.json
   object_preview_manifest.json
+
+<waic repo>/.gradio_previews/<prebuilt_scene_id>/
+  scene_current.glb
+  scene_manifest.json
 ```
 
 视频预览缓存：
@@ -476,6 +537,8 @@ manifest 用源文件相对路径、文件大小和 `mtime_ns` 判断是否需�
 
 ## 初始生成流程
 
+### 普通初始生成
+
 1. 用户上传图片，填写 `Task description`，可选填写 `Scene description`。
 2. Gradio 保存图片到 staging image。
 3. 启动初始生成 pipeline。
@@ -488,6 +551,17 @@ manifest 用源文件相对路径、文件大小和 `mtime_ns` 判断是否需�
 10. 启动 dexsim/run-agent。
 11. dexsim/run-agent 退出后查找 audience video 和 LeRobot dataset，生成预览视频。
 12. 交互模式会把日志归档到 `auto_logs/<序号>/log.md`；如果有视频，也会复制到该轮日志目录。
+
+### 预置 scene 生成
+
+1. `Random Input` 或 Auto 选择 `task<task>_<sub_task>.png`，并解析对应 `prebuilt_scene_dir`。
+2. Gradio 保存输入图到 staging image。
+3. 复制 `prebuilt_scene_dir` 到 staging prompt root。
+4. 如果 `Scene description` 非空，启动 staging scene edit pipeline。
+5. 如果 `Scene description` 为空，启动 staging `generate_action_agent_config`。
+6. staging 输出通过普通 promote 流程进入正式 `current`。
+7. 如果执行了预置 scene edit，左侧显示预置 clean scene 快照，右侧显示编辑后的 current scene；否则左侧显示 current scene 快照，右侧为空。
+8. 启动 dexsim/run-agent，后续视频和日志流程与普通初始生成一致。
 
 ## 编辑流程
 
@@ -517,22 +591,23 @@ manifest 用源文件相对路径、文件大小和 `mtime_ns` 判断是否需�
 1. 点击 `Auto`。
 2. Reset 按钮变为 Stop，Auto 历史区显示。
 3. 点击 `Generate`。
-4. `start_auto_loop_state()` 检查可用本地输入图，创建 `auto_loop_token`，设置 `auto_loop_active=True`。
+4. `start_auto_loop_state()` 检查可用本地输入图和预置 clean scene，创建 `auto_loop_token`，设置 `auto_loop_active=True`。
 
 每轮：
 
 1. `auto_round += 1`。
 2. 清理上一轮 generated artifacts。
-3. 根据当前语言随机选择预置任务、预置图片和场景描述。
+3. 根据当前语言随机选择预置任务、预置图片、预置 clean scene 和场景描述。
 4. UI 输入框被本轮自动值覆盖。
-5. 调用 initial pipeline。
-6. pipeline 失败时归档 `pipeline_failed`，清理本轮内容，继续下一轮。
-7. pipeline 成功后启动 dexsim/run-agent。
-8. Auto 等待 `runtime.sim_process is None`。
-9. 记录本轮日志和视频。
-10. 把本轮输入图、完整任务和归档视频写入 Previous Auto Run。
-11. 清理本轮内容。
-12. 如果 loop 仍 active，进入下一轮。
+5. 复制预置 scene 到 staging。
+6. 如果场景描述非空，在 staging 上执行 scene edit；否则只生成 action-agent config。
+7. pipeline/config 失败时归档 `pipeline_failed`，清理本轮内容，继续下一轮。
+8. 成功后 promote 到 current 并启动 dexsim/run-agent。
+9. Auto 等待 `runtime.sim_process is None`。
+10. 记录本轮日志和视频。
+11. 把本轮输入图、完整任务和归档视频写入 Previous Auto Run。
+12. 清理本轮内容。
+13. 如果 loop 仍 active，进入下一轮。
 
 Stop：
 
@@ -665,6 +740,7 @@ Last error: <last_error>（如有）
 - 同一时间只允许一个 pipeline 或 config 生成进程运行。
 - `is_busy=True` 时再次点击 Generate 会返回当前状态，并提示已有任务运行。
 - 新的手动 Generate 会先终止旧 dexsim/run-agent 进程。
+- `Run Task` 要求 Interact 模式、当前 config 齐全，且没有 pipeline 或 dexsim/run-agent 正在运行。
 - Reset 可以在任务运行时执行，并终止 pipeline 和 dexsim/run-agent 进程组。
 - Auto loop 内部复用普通 `run_generate()`，所以 pipeline 阶段也受 `is_busy` 保护。
 - pipeline 完成后 `is_busy=False`，但 Auto 不会立刻进入下一轮，而是等待 dexsim/run-agent 退出。
@@ -678,6 +754,7 @@ UI 会展示：
 - 图片为空。
 - `Task description` 为空。
 - Auto 预置图片缺失。
+- Auto 预置 clean scene 缺失，或没有任何同时具备图片和 clean scene 的可用任务。
 - 编辑模式缺少 current scene state。
 - 编辑模式缺少 current `fast_gym_config.json`。
 - 仅修改任务模式缺少 current gym export。
@@ -709,22 +786,24 @@ UI 会展示：
 2. DexForce logo 条件显示。
 3. Auto / Interact / Parallel Simulation 顶部控制。
 4. 中英文 UI 切换。
-5. Robot 单选：UR5 / Franka。
+5. Robot 单选：Franka / UR5 / UR10。
 6. 图片上传和 webcam 输入。
 7. Task / Scene 双文本输入。
 8. 初始生成 staging。
 9. staging promote 到 current 和失败回滚。
 10. 基于 current 的自然语言编辑。
 11. 仅修改任务并重建 action-agent config。
-12. 初始/编辑双 3D 场景预览。
-13. generated object GLB preview。
-14. stdout 和关键文件驱动进度。
-15. pipeline 成功后启动 dexsim/run-agent。
-16. audience video、LeRobot 数据预览和单环境 combined video。
-17. 交互运行和 Auto 运行日志归档。
-18. Auto 连续循环和 Previous Auto Run 展示。
-19. Reset / Stop。
-20. proxy 环境变量清理。
+12. 预置 clean scene 复制、config 生成和可选 scene edit。
+13. Run Task 仅重跑 dexsim/run-agent。
+14. 初始/编辑双 3D 场景预览。
+15. generated object GLB preview。
+16. stdout 和关键文件驱动进度。
+17. pipeline 成功后启动 dexsim/run-agent。
+18. audience video、LeRobot 数据预览和单环境 combined video。
+19. 交互运行和 Auto 运行日志归档。
+20. Auto 连续循环和 Previous Auto Run 展示。
+21. Reset / Stop。
+22. proxy 环境变量清理。
 
 仍需注意：
 
@@ -732,5 +811,6 @@ UI 会展示：
 2. 仅修改任务模式可能部分覆盖 current config。
 3. Reset 只能终止本地 subprocess，不能取消远端服务已接收的请求。
 4. `outputs` 清理会保留视频文件。
-5. Auto 只保护 `random_input.IMAGE_DIR`，且代码里的默认 auto_images 路径拼写为 `action_agent_pipeline`。
-6. Auto 不调用图片生成 API；`random_input.py` 中的 Ark/Doubao 图片生成函数目前不是 Gradio 路径的一部分。
+5. Auto 只保护 `random_input.IMAGE_DIR` 下的预置图片；fallback `baseline_image_input` 通常不在清理目标里，但也不是显式保护目录。
+6. `gradio_app.py` 和 `random_input.py` 各自读取 `EMBODICHAIN_ROOT`，未设置环境变量时默认值不同。
+7. Auto 不调用图片生成 API；`random_input.py` 中的 Ark/Doubao 图片生成函数目前不是 Gradio 路径的一部分。
