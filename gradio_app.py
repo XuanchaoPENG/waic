@@ -4000,10 +4000,9 @@ def scene_mode_choices(language: str | None) -> list[tuple[str, str]]:
 
 def scene_mode_input_updates(scene_mode: str | None) -> tuple[Any, Any]:
     """Set field availability for the selected scene operation."""
-    is_edit = scene_mode == SCENE_MODE_EDIT
     is_task_only = scene_mode == SCENE_MODE_TASK_ONLY
     return (
-        gr.update(interactive=not is_edit),
+        gr.update(interactive=True),
         gr.update(interactive=not is_task_only),
     )
 

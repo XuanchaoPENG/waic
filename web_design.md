@@ -145,7 +145,7 @@ Parallel Simulation 打开时，dexsim/run-agent 追加：
 
 模式切换时的输入可编辑性来自 `scene_mode_input_updates()`：
 
-- `Edit current scene` 会让 `Task description` 变为不可编辑，但运行时仍要求 task 文本非空。
+- `Edit current scene` 下 `Task description` 仍可编辑，运行时要求 task 文本非空。
 - `Change task only` 会让 `Scene description` 变为不可编辑。
 - 上传新图片会清空 `Random Input` 记录的预置 scene。
 
