@@ -191,6 +191,16 @@ Asset engine 需要安装 SimReady 依赖（Blender、trimesh、LLM 配置等）
 embodichain.gen_sim.simready_pipeline.cli.start
 ```
 
+SimReady 的 OpenAI-compatible 设置集中在 `app_config.py`：
+
+```python
+SIMREADY_OPENAI_API_KEY = os.environ.get("SIMREADY_OPENAI_API_KEY", "")
+SIMREADY_OPENAI_MODEL = os.environ.get("SIMREADY_OPENAI_MODEL", "")
+SIMREADY_OPENAI_BASE_URL = os.environ.get("SIMREADY_OPENAI_BASE_URL", "")
+```
+
+`build_pipeline_env()` 会把其中的非空值映射为上游 CLI 使用的 `OPENAI_API_KEY`、`OPENAI_MODEL` 和 `OPENAI_BASE_URL`。默认留空时，保留继承的 `OPENAI_*` 环境变量和 SimReady 的 JSON 配置；API key 不应写入受 Git 管理的文件。
+
 Scene/Action 的完整运行还需要 action-agent 模块，特别是：
 
 ```text

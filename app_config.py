@@ -17,6 +17,14 @@ PROXY_ENV_KEYS = (
 )
 DIRECT_NO_PROXY_VALUE = "*"
 
+# SimReady uses an OpenAI-compatible multimodal endpoint.  Configure these
+# values here for a local deployment, or provide the matching SIMREADY_* env
+# vars before launch.  Keep the API key out of commits; an empty value leaves
+# any inherited OPENAI_* variables and SimReady's own JSON configuration intact.
+SIMREADY_OPENAI_API_KEY = os.environ.get("SIMREADY_OPENAI_API_KEY", "")
+SIMREADY_OPENAI_MODEL = os.environ.get("SIMREADY_OPENAI_MODEL", "")
+SIMREADY_OPENAI_BASE_URL = os.environ.get("SIMREADY_OPENAI_BASE_URL", "")
+
 
 def configure_direct_network_env(env: Any = None) -> None:
     """Disable proxy inheritance for local pipeline and Gradio processes."""
@@ -27,6 +35,20 @@ def configure_direct_network_env(env: Any = None) -> None:
     env["NO_PROXY"] = DIRECT_NO_PROXY_VALUE
     env["no_proxy"] = DIRECT_NO_PROXY_VALUE
     env.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+
+
+def configure_simready_llm_env(env: Any = None) -> None:
+    """Map app-level SimReady settings to the upstream CLI's environment."""
+    if env is None:
+        env = os.environ
+    configured_values = {
+        "OPENAI_API_KEY": SIMREADY_OPENAI_API_KEY,
+        "OPENAI_MODEL": SIMREADY_OPENAI_MODEL,
+        "OPENAI_BASE_URL": SIMREADY_OPENAI_BASE_URL,
+    }
+    for key, value in configured_values.items():
+        if value:
+            env[key] = value
 
 
 APP_ROOT = Path(__file__).resolve().parent

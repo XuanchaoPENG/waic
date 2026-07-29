@@ -71,6 +71,7 @@ def start_pipeline(command: list[str]) -> subprocess.Popen[str]:
 def build_pipeline_env() -> dict[str, str]:
     env = os.environ.copy()
     configure_direct_network_env(env)
+    configure_simready_llm_env(env)
     return env
 
 
@@ -172,5 +173,4 @@ def read_process_output(
         return
     for line in process.stdout:
         output_queue.put(line.rstrip())
-
 
