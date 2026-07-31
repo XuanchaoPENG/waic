@@ -18,6 +18,7 @@ from typing import Any, Iterable
 import gradio as gr
 import trimesh
 
+from app_articraft import build_articraft_panel
 from app_config import (
     DEBUG_ASSET_ENGINE_ROOT,
     EMBODICHAIN_ROOT,
@@ -43,7 +44,9 @@ def _mesh_path(paths: Iterable[Path]) -> Path:
     meshes = [path for path in paths if path.suffix.lower() in SIMREADY_MESH_SUFFIXES]
     if not meshes:
         supported = ", ".join(sorted(SIMREADY_MESH_SUFFIXES))
-        raise ValueError(f"Upload one mesh file ({supported}) and optional material files.")
+        raise ValueError(
+            f"Upload one mesh file ({supported}) and optional material files."
+        )
     return meshes[0]
 
 
@@ -84,7 +87,10 @@ def prepare_asset_input_preview(upload_value: Any):
         source = _mesh_path(_as_paths(upload_value))
         preview = DEBUG_ASSET_ENGINE_ROOT / "previews" / f"{uuid.uuid4().hex}.glb"
         _export_preview(source, preview)
-        return preview.as_posix(), "**Asset input ready.** Review the model, then run SimReady."
+        return (
+            preview.as_posix(),
+            "**Asset input ready.** Review the model, then run SimReady.",
+        )
     except Exception as exc:
         return None, f"**Input error:** {exc}"
 
@@ -102,7 +108,9 @@ def _find_simready_output(output_root: Path) -> Path:
             reverse=True,
         )
     if not candidates:
-        raise FileNotFoundError("SimReady completed without asset_simready.glb or asset_simready.obj.")
+        raise FileNotFoundError(
+            "SimReady completed without asset_simready.glb or asset_simready.obj."
+        )
     return candidates[0]
 
 
@@ -136,16 +144,22 @@ def run_simready_asset(upload_value: Any, category: str):
         category,
     ]
     log_lines = ["$ " + " ".join(command)]
-    yield input_preview.as_posix(), None, None, "**SimReady is running…**", "\n".join(log_lines)
+    yield input_preview.as_posix(), None, None, "**SimReady is running…**", "\n".join(
+        log_lines
+    )
 
     try:
         process = start_pipeline(command)
     except Exception as exc:
-        yield input_preview.as_posix(), None, None, f"**Pipeline start failed:** {exc}", "\n".join(log_lines)
+        yield input_preview.as_posix(), None, None, f"**Pipeline start failed:** {exc}", "\n".join(
+            log_lines
+        )
         return
 
     output_queue: queue.Queue[str] = queue.Queue()
-    reader = threading.Thread(target=read_process_output, args=(process, output_queue), daemon=True)
+    reader = threading.Thread(
+        target=read_process_output, args=(process, output_queue), daemon=True
+    )
     reader.start()
     while process.poll() is None:
         try:
@@ -154,7 +168,9 @@ def run_simready_asset(upload_value: Any, category: str):
         except queue.Empty:
             pass
         # Keep the browser responsive while the Blender/LLM stages run.
-        yield input_preview.as_posix(), None, None, "**SimReady is running…**", "\n".join(log_lines[-160:])
+        yield input_preview.as_posix(), None, None, "**SimReady is running…**", "\n".join(
+            log_lines[-160:]
+        )
         __import__("time").sleep(0.5)
     reader.join(timeout=1)
     try:
@@ -164,38 +180,85 @@ def run_simready_asset(upload_value: Any, category: str):
         pass
 
     if process.returncode != 0:
-        yield input_preview.as_posix(), None, None, f"**SimReady failed** (exit code {process.returncode}).", "\n".join(log_lines[-220:])
+        yield input_preview.as_posix(), None, None, f"**SimReady failed** (exit code {process.returncode}).", "\n".join(
+            log_lines[-220:]
+        )
         return
     try:
         result = _find_simready_output(output_root)
-        preview = result if result.suffix.lower() == ".glb" else _export_preview(result, run_root / "output_preview.glb")
-        yield input_preview.as_posix(), preview.as_posix(), result.as_posix(), "**SimReady completed.**", "\n".join(log_lines[-220:])
+        preview = (
+            result
+            if result.suffix.lower() == ".glb"
+            else _export_preview(result, run_root / "output_preview.glb")
+        )
+        yield input_preview.as_posix(), preview.as_posix(), result.as_posix(), "**SimReady completed.**", "\n".join(
+            log_lines[-220:]
+        )
     except Exception as exc:
-        yield input_preview.as_posix(), None, None, f"**Output error:** {exc}", "\n".join(log_lines[-220:])
+        yield input_preview.as_posix(), None, None, f"**Output error:** {exc}", "\n".join(
+            log_lines[-220:]
+        )
 
 
 def build_asset_engine_panel() -> dict[str, Any]:
     """Create the Debug Asset-engine panel and return its event endpoints."""
     with gr.Column(visible=True) as panel:
-        gr.Markdown("## Asset engine\nUpload one 3D asset, inspect it, then convert it to a SimReady asset. DexSim is not started in this engine.")
-        with gr.Row():
-            uploads = gr.File(
-                label="3D asset and optional material files",
-                file_count="multiple",
-                type="filepath",
-                file_types=[".glb", ".gltf", ".obj", ".ply", ".stl", ".mtl", ".png", ".jpg", ".jpeg", ".webp", ".bin"],
-            )
-            category = gr.Textbox(label="Asset category", value="rigid_object", placeholder="e.g. cup, chair, bottle")
-        with gr.Row():
-            input_model = gr.Model3D(label="Input asset preview", height=440, clear_color=(0.94, 0.94, 0.94, 1.0))
-            output_model = gr.Model3D(label="SimReady asset preview", height=440, clear_color=(0.94, 0.94, 0.94, 1.0))
-        with gr.Row():
-            run_button = gr.Button("Run SimReady", variant="primary")
-            output_file = gr.File(label="SimReady asset output", interactive=False)
-        status = gr.Markdown("**Status:** waiting for an asset.")
-        log = gr.Textbox(label="Pipeline log", lines=10, interactive=False)
+        gr.Markdown(
+            "## Asset engine\nConvert an existing mesh with SimReady, or generate a new articulated asset through Articraft and Codex. DexSim is not started in this engine."
+        )
+        with gr.Tabs():
+            with gr.Tab("SimReady"):
+                with gr.Row():
+                    uploads = gr.File(
+                        label="3D asset and optional material files",
+                        file_count="multiple",
+                        type="filepath",
+                        file_types=[
+                            ".glb",
+                            ".gltf",
+                            ".obj",
+                            ".ply",
+                            ".stl",
+                            ".mtl",
+                            ".png",
+                            ".jpg",
+                            ".jpeg",
+                            ".webp",
+                            ".bin",
+                        ],
+                    )
+                    category = gr.Textbox(
+                        label="Asset category",
+                        value="rigid_object",
+                        placeholder="e.g. cup, chair, bottle",
+                    )
+                with gr.Row():
+                    input_model = gr.Model3D(
+                        label="Input asset preview",
+                        height=440,
+                        clear_color=(0.94, 0.94, 0.94, 1.0),
+                    )
+                    output_model = gr.Model3D(
+                        label="SimReady asset preview",
+                        height=440,
+                        clear_color=(0.94, 0.94, 0.94, 1.0),
+                    )
+                with gr.Row():
+                    run_button = gr.Button("Run SimReady", variant="primary")
+                    output_file = gr.File(
+                        label="SimReady asset output", interactive=False
+                    )
+                status = gr.Markdown("**Status:** waiting for an asset.")
+                log = gr.Textbox(label="Pipeline log", lines=10, interactive=False)
+            with gr.Tab("Articulation"):
+                build_articraft_panel()
 
-    uploads.change(prepare_asset_input_preview, inputs=[uploads], outputs=[input_model, status], queue=False)
+    uploads.change(
+        prepare_asset_input_preview,
+        inputs=[uploads],
+        outputs=[input_model, status],
+        queue=False,
+    )
     run_button.click(
         run_simready_asset,
         inputs=[uploads, category],

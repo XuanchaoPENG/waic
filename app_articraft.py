@@ -1,0 +1,622 @@
+"""Codex-backed Articraft generation for the Asset engine.
+
+The integration uses Articraft's external-agent workflow: Articraft owns
+record creation and validation while Codex authors the generated model. All
+mutable run data is kept under ``ARTICRAFT_OUTPUT_ROOT``.
+"""
+
+from __future__ import annotations
+
+import os
+import queue
+import json
+import shutil
+import subprocess
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import gradio as gr
+
+from app_config import (
+    ARTICRAFT_CONDA_ENV,
+    ARTICRAFT_OUTPUT_ROOT,
+    ARTICRAFT_REPOSITORY_URL,
+    ARTICRAFT_ROOT,
+)
+from app_processes import read_process_output
+
+
+def _command_path(name: str) -> str | None:
+    """Resolve commands even when Gradio did not inherit an interactive PATH."""
+    configured = os.environ.get(f"{name.upper()}_EXE")
+    return configured or shutil.which(name)
+
+
+def _conda_path() -> str | None:
+    configured = os.environ.get("CONDA_EXE")
+    if configured and Path(configured).is_file():
+        return configured
+    return _command_path("conda")
+
+
+def _conda_command(*args: str) -> list[str]:
+    conda = _conda_path()
+    if not conda:
+        raise RuntimeError("Conda was not found. Set CONDA_EXE before starting Gradio.")
+    return [conda, "run", "--no-capture-output", "-n", ARTICRAFT_CONDA_ENV, *args]
+
+
+def _articraft_cli_command(*args: str) -> list[str]:
+    """Run the CLI from the checked-out source without installing it with pip."""
+    return _conda_command("python", "-m", "cli.main", *args)
+
+
+def _articraft_conda_environment_exists() -> bool:
+    """Check only for the named Conda environment, not package installation."""
+    conda = _conda_path()
+    if not conda:
+        return False
+    try:
+        result = subprocess.run(
+            [conda, "env", "list", "--json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode:
+            return False
+        environments = json.loads(result.stdout or "{}").get("envs", [])
+        return any(Path(path).name == ARTICRAFT_CONDA_ENV for path in environments)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+
+
+def _run_check(
+    command: list[str], *, timeout: int = 45
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=ARTICRAFT_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _short_output(
+    result: subprocess.CompletedProcess[str], *, limit: int = 1800
+) -> str:
+    output = (result.stdout or "").strip()
+    return output[-limit:] if len(output) > limit else (output or "(no output)")
+
+
+def _check_requirements() -> tuple[list[str], list[str], str | None]:
+    """Return diagnostics and the Codex executable, without creating an asset."""
+    errors: list[str] = []
+    details: list[str] = []
+    if not (
+        ARTICRAFT_ROOT.is_dir()
+        and (ARTICRAFT_ROOT / ".git").exists()
+        and (ARTICRAFT_ROOT / "pyproject.toml").is_file()
+    ):
+        errors.append(f".articraft checkout is not ready: {ARTICRAFT_ROOT}")
+    if not _conda_path():
+        errors.append("Conda is not on PATH. Set CONDA_EXE to the conda executable.")
+    elif not _articraft_conda_environment_exists():
+        errors.append(f"Conda environment not found: {ARTICRAFT_CONDA_ENV}")
+    else:
+        details.append(f"Conda environment: {ARTICRAFT_CONDA_ENV}")
+
+    codex = _command_path("codex")
+    if not codex:
+        errors.append("Codex CLI is not on PATH. Install it or set CODEX_EXE.")
+    elif not errors:
+        try:
+            result = _run_check([codex, "--version"])
+            if result.returncode:
+                errors.append(f"Codex CLI check failed: {_short_output(result)}")
+            else:
+                details.append(f"Codex: {_short_output(result, limit=120)}")
+        except Exception as exc:
+            errors.append(f"Codex CLI check failed: {exc}")
+
+    if not errors:
+        details.append(f".articraft checkout: {ARTICRAFT_ROOT}")
+    return details, errors, codex
+
+
+def _prepare_articraft_checkout() -> tuple[bool, str]:
+    """Clone the configured checkout when absent, without overwriting a directory."""
+    if ARTICRAFT_ROOT.exists():
+        if (ARTICRAFT_ROOT / ".git").exists() and (ARTICRAFT_ROOT / "pyproject.toml").is_file():
+            return True, f".articraft checkout: {ARTICRAFT_ROOT}"
+        return False, f"{ARTICRAFT_ROOT} exists but is not an Articraft Git checkout; it was left untouched."
+
+    git = _command_path("git")
+    if not git:
+        return False, "Git is not on PATH, so .articraft cannot be cloned."
+    try:
+        ARTICRAFT_ROOT.parent.mkdir(parents=True, exist_ok=True)
+        clone = subprocess.run(
+            [git, "clone", ARTICRAFT_REPOSITORY_URL, str(ARTICRAFT_ROOT)],
+            cwd=ARTICRAFT_ROOT.parent,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"Unable to clone Articraft: {exc}"
+    if clone.returncode:
+        return False, f"Articraft clone failed: {_short_output(clone, limit=3000)}"
+    return True, f"Cloned .articraft from {ARTICRAFT_REPOSITORY_URL}"
+
+
+def configure_articraft_environment() -> str:
+    """Clone the checkout, then verify the Conda environment and Codex."""
+    checkout_ready, checkout_message = _prepare_articraft_checkout()
+    if not checkout_ready:
+        return "**Articulation is not ready.**\n\n- " + checkout_message
+    try:
+        for directory in (
+            ARTICRAFT_OUTPUT_ROOT,
+            ARTICRAFT_OUTPUT_ROOT / "runs",
+            ARTICRAFT_OUTPUT_ROOT / "exports",
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        return f"**Unable to prepare the shared Articulation output folder:** `{exc}`"
+    details, errors, _ = _check_requirements()
+    if errors:
+        return "**Articulation is not ready.**\n\n" + "\n".join(
+            f"- {error}" for error in errors
+        )
+    details.insert(0, checkout_message)
+    details.extend(
+        (
+            f"Shared output: `{ARTICRAFT_OUTPUT_ROOT}`",
+            "Generation runs the `.articraft` checkout directly with `conda run`; no `pip install -e .` is required.",
+        )
+    )
+    return "**Articulation is ready.**\n\n" + "\n".join(
+        f"- {detail}" for detail in details
+    )
+
+
+def _record_id() -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    # Articraft validates external IDs against the required ``rec_`` prefix.
+    return f"rec_ui_articraft_{timestamp}_{uuid.uuid4().hex[:8]}"
+
+
+def _copy_reference_image(value: Any, run_root: Path) -> Path | None:
+    if not value:
+        return None
+    source = Path(str(value))
+    if not source.is_file():
+        raise ValueError(
+            "The reference image is no longer available; please upload it again."
+        )
+    suffix = source.suffix.lower() or ".png"
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise ValueError("Reference image must be PNG, JPG, JPEG, or WEBP.")
+    target = run_root / f"reference{suffix}"
+    shutil.copy2(source, target)
+    return target
+
+
+def _active_model_path(record_dir: Path) -> Path:
+    candidates = sorted(record_dir.glob("revisions/*/model.py"))
+    if len(candidates) != 1:
+        raise FileNotFoundError(
+            f"Expected one active model.py in {record_dir}, found {len(candidates)}."
+        )
+    return candidates[0]
+
+
+def _make_result_bundle(record_id: str) -> tuple[Path, Path]:
+    materialized = (
+        ARTICRAFT_OUTPUT_ROOT / "data" / "cache" / "record_materialization" / record_id
+    )
+    if not (materialized / "model.urdf").is_file():
+        raise FileNotFoundError(
+            "Articraft completed without a compiled model.urdf output."
+        )
+    exports_root = ARTICRAFT_OUTPUT_ROOT / "exports"
+    exports_root.mkdir(parents=True, exist_ok=True)
+    archive = Path(
+        shutil.make_archive(
+            (exports_root / record_id).as_posix(),
+            "zip",
+            root_dir=materialized,
+        )
+    )
+    return materialized, archive
+
+
+def _external_check_is_unsupported(result: subprocess.CompletedProcess[str]) -> bool:
+    """Recognize the older Articraft CLI, which has no ``external check``."""
+    output = (result.stdout or "").lower()
+    return "invalid choice: 'check'" in output and "external" in output
+
+
+def _compile_report_failures(record_id: str) -> list[str]:
+    """Read blocking QC/test signals from the older CLI's compile report."""
+    report_path = (
+        ARTICRAFT_OUTPUT_ROOT
+        / "data"
+        / "cache"
+        / "record_materialization"
+        / record_id
+        / "compile_report.json"
+    )
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [f"Compile report is unavailable: {report_path}"]
+    bundle = report.get("signal_bundle") if isinstance(report, dict) else None
+    signals = bundle.get("signals") if isinstance(bundle, dict) else None
+    if not isinstance(signals, list):
+        return ["Compile report contains no validation signals."]
+    failures: list[str] = []
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        if signal.get("severity") == "failure" or signal.get("blocking") is True:
+            failures.append(str(signal.get("summary") or signal.get("code") or "Unnamed validation failure"))
+    return failures
+
+
+def _build_codex_prompt(
+    *,
+    prompt: str,
+    record_id: str,
+    record_dir: Path,
+    model_path: Path,
+    reference_image: Path | None,
+) -> str:
+    image_note = (
+        f"A reference image is attached and also copied at {reference_image}. Use it as visual reference."
+        if reference_image
+        else "No reference image was supplied."
+    )
+    return f"""You are the Codex external author for one Articraft articulated 3D asset.
+
+User request:
+{prompt}
+
+{image_note}
+
+The Articraft source repository is {ARTICRAFT_ROOT}. The shared UI output/storage root is
+{ARTICRAFT_OUTPUT_ROOT}. Articraft has already created this external workbench record:
+record_id={record_id}
+record_dir={record_dir}
+active_model={model_path}
+
+Codex itself is launched from the Gradio environment, not the Articraft Conda environment.
+For every Articraft CLI invocation, use this command prefix:
+
+{_conda_path()} run --no-capture-output -n {ARTICRAFT_CONDA_ENV} python -m cli.main
+
+Follow EXTERNAL_AGENT_DATA.md exactly. Read the design and link-naming guidance it references,
+then use relevant SDK docs/examples. Edit only the active model.py for this record. Do not create
+record folders or metadata manually, edit unrelated records, commit/push, or promote this
+workbench record to the dataset.
+
+Create a realistic mechanically meaningful articulated object matching the request. Use semantic
+parts, visible plausible joints, appropriate materials, and prompt-specific run_tests(). Iterate
+until this succeeds:
+
+{_conda_path()} run --no-capture-output -n {ARTICRAFT_CONDA_ENV} python -m cli.main external --repo-root {ARTICRAFT_OUTPUT_ROOT} check {record_id}
+
+Then run:
+
+{_conda_path()} run --no-capture-output -n {ARTICRAFT_CONDA_ENV} python -m cli.main external --repo-root {ARTICRAFT_OUTPUT_ROOT} finalize {record_id}
+
+The Gradio app packages the compiled URDF and meshes after you finish. In your final response,
+briefly state the articulation mechanisms and validation result."""
+
+
+def generate_articraft_asset(prompt_value: str, image_value: Any):
+    """Initialize a record, let Codex author it, and expose one result bundle."""
+    prompt = (prompt_value or "").strip()
+    if not prompt:
+        yield None, "", "**Input error:** enter a description of the articulated object.", ""
+        return
+
+    details, errors, codex = _check_requirements()
+    if errors or not codex:
+        message = (
+            "\n".join(f"- {error}" for error in errors) or "Codex CLI is unavailable."
+        )
+        yield None, "", f"**Articulation is not ready.**\n\n{message}", ""
+        return
+
+    record_id = _record_id()
+    run_root = ARTICRAFT_OUTPUT_ROOT / "runs" / record_id
+    record_dir = ARTICRAFT_OUTPUT_ROOT / "data" / "records" / record_id
+    log_lines = [*details, f"Shared output: {ARTICRAFT_OUTPUT_ROOT}"]
+    try:
+        run_root.mkdir(parents=True, exist_ok=False)
+        reference_image = _copy_reference_image(image_value, run_root)
+        init_command = _articraft_cli_command(
+            "external",
+            "--repo-root",
+            str(ARTICRAFT_OUTPUT_ROOT),
+            "init",
+            "--agent",
+            "codex",
+            "--record-id",
+            record_id,
+            prompt,
+        )
+        log_lines.append("$ " + " ".join(init_command[:-1]) + " <prompt>")
+        initialized = _run_check(init_command, timeout=90)
+        log_lines.append(_short_output(initialized, limit=4000))
+        if initialized.returncode:
+            yield None, "", "**Articraft record initialization failed.**", "\n".join(
+                log_lines
+            )
+            return
+        model_path = _active_model_path(record_dir)
+    except Exception as exc:
+        yield None, "", f"**Setup failed:** {exc}", "\n".join(log_lines)
+        return
+
+    final_message = run_root / "codex_final_message.txt"
+    codex_command = [
+        codex,
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--color",
+        "never",
+        "-C",
+        str(ARTICRAFT_ROOT),
+        "--add-dir",
+        str(ARTICRAFT_OUTPUT_ROOT),
+        "--output-last-message",
+        str(final_message),
+    ]
+    if reference_image:
+        codex_command.extend(["--image", str(reference_image)])
+    codex_command.append(
+        _build_codex_prompt(
+            prompt=prompt,
+            record_id=record_id,
+            record_dir=record_dir,
+            model_path=model_path,
+            reference_image=reference_image,
+        )
+    )
+    log_lines.append("$ codex exec --sandbox workspace-write …")
+    yield None, record_dir.as_posix(), "**Codex is generating and validating the Articraft model…**", "\n".join(
+        log_lines
+    )
+
+    try:
+        process = subprocess.Popen(
+            codex_command,
+            cwd=ARTICRAFT_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+            env=os.environ.copy(),
+        )
+    except Exception as exc:
+        yield None, record_dir.as_posix(), f"**Codex could not start:** {exc}", "\n".join(
+            log_lines
+        )
+        return
+
+    output_queue: queue.Queue[str] = queue.Queue()
+    reader = threading.Thread(
+        target=read_process_output, args=(process, output_queue), daemon=True
+    )
+    reader.start()
+    while process.poll() is None:
+        try:
+            while True:
+                log_lines.append(output_queue.get_nowait())
+        except queue.Empty:
+            pass
+        yield None, record_dir.as_posix(), "**Codex is generating and validating the Articraft model…**", "\n".join(
+            log_lines[-240:]
+        )
+        time.sleep(0.75)
+    reader.join(timeout=2)
+    try:
+        while True:
+            log_lines.append(output_queue.get_nowait())
+    except queue.Empty:
+        pass
+
+    if final_message.is_file():
+        final_text = final_message.read_text(encoding="utf-8", errors="replace").strip()
+        if final_text:
+            log_lines.append("\nCodex final response:\n" + final_text)
+    if process.returncode:
+        yield None, record_dir.as_posix(), f"**Codex generation failed** (exit code {process.returncode}).", "\n".join(
+            log_lines[-300:]
+        )
+        return
+
+    # Do not rely solely on Codex's final message: independently run the
+    # external validation and finalize gates before exposing an output bundle.
+    check_command = _articraft_cli_command(
+        "external",
+        "--repo-root",
+        str(ARTICRAFT_OUTPUT_ROOT),
+        "check",
+        record_id,
+    )
+    log_lines.append("$ " + " ".join(check_command))
+    yield (
+        None,
+        record_dir.as_posix(),
+        "**Codex finished. Articraft is running the final validation gate…**",
+        "\n".join(log_lines[-300:]),
+    )
+    try:
+        checked = _run_check(check_command, timeout=300)
+        log_lines.append(_short_output(checked, limit=5000))
+    except Exception as exc:
+        yield (
+            None,
+            record_dir.as_posix(),
+            f"**Final Articraft validation could not run:** {exc}",
+            "\n".join(log_lines[-300:]),
+        )
+        return
+    if checked.returncode:
+        if not _external_check_is_unsupported(checked):
+            yield (
+                None,
+                record_dir.as_posix(),
+                "**Articraft validation failed; no output bundle was published.**",
+                "\n".join(log_lines[-300:]),
+            )
+            return
+        # The older CLI reports external init/finalize/categories only. Its
+        # equivalent strict model validation is the top-level compile command.
+        compile_command = _articraft_cli_command(
+            "compile",
+            "--repo-root",
+            str(ARTICRAFT_OUTPUT_ROOT),
+            "--target",
+            "full",
+            "--validate",
+            record_id,
+        )
+        log_lines.append("external check is unavailable; falling back to compile --validate.")
+        log_lines.append("$ " + " ".join(compile_command))
+        yield (
+            None,
+            record_dir.as_posix(),
+            "**Using this Articraft version's compile validation gate…**",
+            "\n".join(log_lines[-300:]),
+        )
+        try:
+            compiled = _run_check(compile_command, timeout=300)
+            log_lines.append(_short_output(compiled, limit=5000))
+        except Exception as exc:
+            yield (
+                None,
+                record_dir.as_posix(),
+                f"**Fallback Articraft validation could not run:** {exc}",
+                "\n".join(log_lines[-300:]),
+            )
+            return
+        if compiled.returncode:
+            yield (
+                None,
+                record_dir.as_posix(),
+                "**Articraft validation failed; no output bundle was published.**",
+                "\n".join(log_lines[-300:]),
+            )
+            return
+        failures = _compile_report_failures(record_id)
+        if failures:
+            log_lines.append("Blocking compile-report failures: " + "; ".join(failures))
+            yield (
+                None,
+                record_dir.as_posix(),
+                "**Articraft validation found blocking model defects; no output bundle was published.**",
+                "\n".join(log_lines[-300:]),
+            )
+            return
+
+    finalize_command = _articraft_cli_command(
+        "external",
+        "--repo-root",
+        str(ARTICRAFT_OUTPUT_ROOT),
+        "finalize",
+        record_id,
+    )
+    log_lines.append("$ " + " ".join(finalize_command))
+    try:
+        finalized = _run_check(finalize_command, timeout=300)
+        log_lines.append(_short_output(finalized, limit=5000))
+    except Exception as exc:
+        yield (
+            None,
+            record_dir.as_posix(),
+            f"**Articraft finalization could not run:** {exc}",
+            "\n".join(log_lines[-300:]),
+        )
+        return
+    if finalized.returncode:
+        yield (
+            None,
+            record_dir.as_posix(),
+            "**Articraft finalization failed; no output bundle was published.**",
+            "\n".join(log_lines[-300:]),
+        )
+        return
+
+    try:
+        materialized, archive = _make_result_bundle(record_id)
+        status = (
+            "**Articraft generation completed and passed the Codex validation workflow.**\n\n"
+            f"- Record: `{record_dir}`\n- Compiled output: `{materialized}`\n- Downloadable bundle: `{archive}`"
+        )
+        yield archive.as_posix(), record_dir.as_posix(), status, "\n".join(
+            log_lines[-300:]
+        )
+    except Exception as exc:
+        yield None, record_dir.as_posix(), f"**Codex finished, but result packaging failed:** {exc}", "\n".join(
+            log_lines[-300:]
+        )
+
+
+def build_articraft_panel() -> None:
+    """Render the Articraft tab inside the Asset engine."""
+    gr.Markdown(
+        "### Articulation\n"
+        "Generate an articulated object from text and an optional reference image. Codex writes and validates the Articraft model; only submit trusted requests."
+    )
+    with gr.Row():
+        configure_button = gr.Button("Configure Articulation & check Codex")
+        generate_button = gr.Button("Generate articulation", variant="primary")
+    environment_status = gr.Markdown("**Environment:** not checked.")
+    with gr.Row():
+        prompt = gr.Textbox(
+            label="Articulated object description",
+            lines=5,
+            placeholder="e.g. A countertop toaster oven with a hinged door and rotating temperature knob.",
+        )
+        image = gr.Image(
+            label="Optional reference image",
+            type="filepath",
+            image_mode="RGB",
+            sources=["upload"],
+        )
+    with gr.Row():
+        output_file = gr.File(
+            label="Compiled Articulation result bundle (.zip)", interactive=False
+        )
+        record_folder = gr.Textbox(label="Articulation record folder", interactive=False)
+    generation_status = gr.Markdown("**Status:** waiting for a description.")
+    generation_log = gr.Textbox(
+        label="Codex / Articraft log", lines=14, interactive=False
+    )
+
+    configure_button.click(
+        configure_articraft_environment, outputs=[environment_status], queue=False
+    )
+    generate_button.click(
+        generate_articraft_asset,
+        inputs=[prompt, image],
+        outputs=[output_file, record_folder, generation_status, generation_log],
+    )
