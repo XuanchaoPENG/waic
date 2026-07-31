@@ -65,7 +65,11 @@ def build_demo() -> gr.Blocks:
         with gr.Column(visible=False) as debug_engine_area:
             asset_engine = build_asset_engine_panel()
             with gr.Column(visible=False) as scene_engine_panel:
-                gr.Markdown("## Scene engine\nThis is the same generation/edit workflow as Demo → Interact. It keeps the 3D previews and promotion logic, but never starts DexSim or a parallel environment.")
+                gr.Markdown(
+                    "## Scene engine\n"
+                    "Upload one image to generate a Scene Engine export. "
+                    "The resulting Viser page is shown below."
+                )
                 with gr.Row():
                     with gr.Column(scale=1):
                         debug_scene_image = gr.Image(
@@ -75,32 +79,18 @@ def build_demo() -> gr.Blocks:
                             format="png",
                             height=300,
                         )
-                        debug_scene_task = gr.Textbox(
-                            label=UI_TEXT[LANGUAGE_EN]["task_description"],
-                            placeholder=UI_TEXT[LANGUAGE_EN]["task_placeholder"],
-                        )
-                        debug_scene_description = gr.Textbox(
-                            label=UI_TEXT[LANGUAGE_EN]["scene_description"],
-                            placeholder=UI_TEXT[LANGUAGE_EN]["scene_placeholder"],
-                        )
-                        debug_scene_mode = gr.Radio(
-                            choices=scene_mode_choices(LANGUAGE_EN),
-                            value=SCENE_MODE_INITIAL,
-                            label=UI_TEXT[LANGUAGE_EN]["scene_mode"],
-                        )
-                        debug_scene_robot = gr.Radio(
-                            choices=ROBOT_PROFILES,
-                            value=DEFAULT_ROBOT_PROFILE,
-                            label=UI_TEXT[LANGUAGE_EN]["robot"],
-                        )
                         debug_scene_run = gr.Button("Generate scene", variant="primary")
                     with gr.Column(scale=2):
                         debug_scene_progress = gr.Slider(0, 100, value=0, step=1, label=UI_TEXT[LANGUAGE_EN]["progress"], interactive=False)
                         debug_scene_status = gr.Markdown(format_status("Idle."))
-                        with gr.Row():
-                            debug_scene_initial = gr.Model3D(label=UI_TEXT[LANGUAGE_EN]["initial_preview"], height=400, clear_color=(0.94, 0.94, 0.94, 1.0))
-                            debug_scene_edited = gr.Model3D(label=UI_TEXT[LANGUAGE_EN]["edited_preview"], height=400, clear_color=(0.94, 0.94, 0.94, 1.0))
-                        debug_scene_objects = gr.Model3D(label=UI_TEXT[LANGUAGE_EN]["object_preview"], height=320, clear_color=(0.94, 0.94, 0.94, 1.0))
+                        debug_scene_output = gr.Textbox(
+                            label="Scene output directory (hash-named)", interactive=False
+                        )
+                        debug_scene_preview = gr.HTML(
+                            "<div style='padding: 1rem; color: #6b7280;'>"
+                            "The Viser preview will appear here after generation."
+                            "</div>"
+                        )
             with gr.Column(visible=False) as action_engine_panel:
                 gr.Markdown("## Action engine\nUses the Gym scene produced by Scene engine (not merely a rendered GLB), then generates the action config and launches DexSim. This retains collisions, poses and physics metadata required by simulation.")
                 with gr.Row():
@@ -265,7 +255,11 @@ def build_demo() -> gr.Blocks:
         )
         for engine, button in zip(
             (engine for engine, _ in DEBUG_ENGINES),
-            (asset_engine_button, scene_engine_button, action_engine_button),
+            (
+                asset_engine_button,
+                scene_engine_button,
+                action_engine_button,
+            ),
         ):
             button.click(
                 select_debug_engine,
@@ -280,27 +274,14 @@ def build_demo() -> gr.Blocks:
                 ],
                 queue=False,
             )
-        debug_scene_mode.change(
-            scene_mode_input_updates,
-            inputs=[debug_scene_mode],
-            outputs=[debug_scene_task, debug_scene_description],
-            queue=False,
-        )
         debug_scene_run.click(
             run_scene_engine,
-            inputs=[
-                debug_scene_image,
-                debug_scene_task,
-                debug_scene_description,
-                debug_scene_mode,
-                debug_scene_robot,
-            ],
+            inputs=[debug_scene_image],
             outputs=[
                 debug_scene_progress,
                 debug_scene_status,
-                debug_scene_initial,
-                debug_scene_edited,
-                debug_scene_objects,
+                debug_scene_output,
+                debug_scene_preview,
             ],
         )
         debug_action_load.click(

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import html
+import io
 import json
 import importlib.util
 import math
@@ -7,6 +10,7 @@ import os
 import queue
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -1911,24 +1915,263 @@ def run_generate_for_top_mode(
     finish_auto_loop(loop_token)
 
 
-def run_scene_engine(
+def _scene_engine_phase_from_log(line: str, current_key: str) -> str:
+    """Map the standalone Scene Engine's stage names to the shared progress UI."""
+    text = line.lower()
+    mapping = (
+        ("scene understanding", "scene_intake"),
+        ("scene segmentation", "relations"),
+        ("coarse layout", "asset_generation"),
+        ("scene export", "gym_export"),
+    )
+    current_progress = PHASES.get(current_key, PHASES["idle"]).progress
+    for needle, phase_key in mapping:
+        if needle in text and PHASES[phase_key].progress > current_progress:
+            return phase_key
+    return current_key
+
+
+def _scene_engine_updates(
+    output_root: Path | None = None,
+    preview_html: str | None = None,
+) -> tuple[int, str, str | None, str]:
+    with runtime_lock:
+        phase = PHASES.get(runtime.phase_key, PHASES["idle"])
+        status = format_status(
+            runtime.status,
+            phase=phase,
+            busy=runtime.is_busy,
+            last_error=runtime.last_error,
+        )
+    return (
+        phase.progress,
+        status,
+        output_root.as_posix() if output_root is not None else None,
+        preview_html or "",
+    )
+
+
+def _prepare_scene_engine_input(
     image_value: str | np.ndarray | Image.Image,
-    task_text: str,
-    env_text: str,
-    scene_mode: str,
-    robot_profile: str | None,
-):
-    """Run the Demo/Interact scene workflow, omitting only DexSim."""
-    for snapshot in run_generate(
-        image_value,
-        task_text,
-        env_text,
-        scene_mode=scene_mode,
-        robot_profile=robot_profile,
-        launch_simulation=False,
-    ):
-        # ui_snapshot is (video, task, progress, status, initial, edited, objects).
-        yield snapshot[2], snapshot[3], snapshot[4], snapshot[5], snapshot[6]
+) -> tuple[str, Path, Path]:
+    """Normalize an uploaded image and store it under a stable content hash."""
+    if image_value is None:
+        raise ValueError("Please upload an image first.")
+    if isinstance(image_value, str):
+        image = Image.open(image_value)
+    elif isinstance(image_value, np.ndarray):
+        image = Image.fromarray(image_value)
+    elif isinstance(image_value, Image.Image):
+        image = image_value
+    else:
+        raise TypeError(f"Unsupported image input type: {type(image_value)!r}")
+
+    normalized = ImageOps.exif_transpose(image).convert("RGB")
+    image_bytes = io.BytesIO()
+    normalized.save(image_bytes, format="PNG")
+    scene_hash = hashlib.sha256(image_bytes.getvalue()).hexdigest()[:16]
+    output_root = DEBUG_SCENE_ENGINE_ROOT / scene_hash
+    output_root.mkdir(parents=True, exist_ok=True)
+    image_path = output_root / "input.png"
+    image_path.write_bytes(image_bytes.getvalue())
+    return scene_hash, output_root, image_path
+
+
+def _wait_for_viser(port: int, process: subprocess.Popen[str]) -> bool:
+    """Wait briefly for Viser's HTTP listener, without treating Ctrl-C as success."""
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return False
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return True
+        except OSError:
+            time.sleep(0.25)
+    return False
+
+
+def _viser_iframe(port: int, scene_hash: str) -> str:
+    """Embed the Viser service using the same hostname as the Gradio page."""
+    srcdoc = (
+        "<script>window.location.replace(window.top.location.protocol + '//' + "
+        f"window.top.location.hostname + ':{port}');</script>"
+    )
+    return (
+        f"<div style='margin-top:0.5rem'><strong>Viser preview: {html.escape(scene_hash)}</strong>"
+        f"<iframe title='Viser scene preview {html.escape(scene_hash)}' "
+        f"srcdoc=\"{html.escape(srcdoc, quote=True)}\" "
+        "style='width:100%; height:680px; border:1px solid #d1d5db; border-radius:8px; margin-top:0.5rem;'></iframe>"
+        "</div>"
+    )
+
+
+def run_scene_engine(image_value: str | np.ndarray | Image.Image):
+    """Generate one image-conditioned scene and expose its Viser preview."""
+    output_root: Path | None = None
+    preview_html = ""
+    try:
+        scene_hash, output_root, image_path = _prepare_scene_engine_input(image_value)
+        if not SCENE_ENGINE_CONFIG.is_file():
+            raise FileNotFoundError(f"Scene Engine config not found: {SCENE_ENGINE_CONFIG}")
+    except Exception as exc:
+        with runtime_lock:
+            set_runtime_phase_locked("failed")
+            runtime.status = f"Input error: {exc}"
+            runtime.last_error = str(exc)
+        yield _scene_engine_updates(output_root, preview_html)
+        return
+
+    old_preview: subprocess.Popen[str] | None = None
+    busy_message: str | None = None
+    with runtime_lock:
+        if runtime.is_busy:
+            runtime.status = "Another pipeline is already running."
+            runtime.last_error = runtime.status
+            busy_message = runtime.status
+        else:
+            old_preview = runtime.scene_preview_process
+            runtime.scene_preview_process = None
+            token = uuid.uuid4().hex
+            runtime.run_token = token
+            runtime.is_busy = True
+            set_runtime_phase_locked("received")
+            runtime.status = f"Image saved. Generating Scene Engine output {scene_hash}."
+            runtime.last_error = None
+            runtime.image_path = image_path
+            runtime.log_lines.clear()
+            clear_run_timing_locked()
+
+    if busy_message is not None:
+        yield _scene_engine_updates(output_root, preview_html)
+        return
+
+    if old_preview is not None:
+        terminate_process_group(old_preview)
+
+    command = [
+        sys.executable,
+        "-m",
+        COMMANDS["scene_engine"]["module"],
+        *COMMANDS["scene_engine"]["base_args"],
+        "--image",
+        str(image_path),
+        "--output_root",
+        str(output_root),
+        "--config",
+        str(SCENE_ENGINE_CONFIG),
+    ]
+    with runtime_lock:
+        runtime.log_lines.append("$ " + " ".join(command))
+    yield _scene_engine_updates(output_root, preview_html)
+
+    try:
+        process = start_pipeline(command)
+    except Exception as exc:
+        with runtime_lock:
+            runtime.is_busy = False
+            set_runtime_phase_locked("failed")
+            runtime.status = f"Scene Engine start failed: {exc}"
+            runtime.last_error = str(exc)
+        yield _scene_engine_updates(output_root, preview_html)
+        return
+
+    output_queue: queue.Queue[str] = queue.Queue()
+    reader = threading.Thread(
+        target=read_process_output, args=(process, output_queue), daemon=True
+    )
+    with runtime_lock:
+        if runtime.run_token != token:
+            terminate_process_group(process)
+            return
+        runtime.process = process
+        start_run_timing_locked("started")
+        set_runtime_phase_locked("started")
+        runtime.status = "Scene Engine generation started."
+    reader.start()
+
+    while process.poll() is None:
+        drained = drain_output_queue(output_queue)
+        with runtime_lock:
+            for line in drained:
+                runtime.log_lines.append(line)
+                set_runtime_phase_locked(
+                    _scene_engine_phase_from_log(line, runtime.phase_key)
+                )
+            if (output_root / "scene_export" / "scene_config.json").is_file():
+                set_runtime_phase_locked("gym_export")
+            runtime.status = PHASES[runtime.phase_key].label + "."
+        yield _scene_engine_updates(output_root, preview_html)
+        time.sleep(0.5)
+
+    reader.join(timeout=1.0)
+    with runtime_lock:
+        for line in drain_output_queue(output_queue):
+            runtime.log_lines.append(line)
+            set_runtime_phase_locked(_scene_engine_phase_from_log(line, runtime.phase_key))
+        runtime.process = None
+
+    scene_export = output_root / "scene_export" / "scene_config.json"
+    if process.returncode != 0 or not scene_export.is_file():
+        detail = (
+            f"Scene Engine exited with code {process.returncode}."
+            if process.returncode != 0
+            else f"Scene Engine did not create {scene_export}."
+        )
+        with runtime_lock:
+            runtime.is_busy = False
+            set_runtime_phase_locked("failed")
+            runtime.status = detail
+            runtime.last_error = detail
+        yield _scene_engine_updates(output_root, preview_html)
+        return
+
+    port = SCENE_ENGINE_VISER_PORT
+    preview_command = [
+        sys.executable,
+        COMMANDS["scene_engine"]["preview_script"],
+        str(output_root),
+        "--viser",
+        "--viser-host",
+        "0.0.0.0",
+        "--viser-port",
+        str(port),
+    ]
+    try:
+        preview_process = start_pipeline(preview_command)
+    except Exception as exc:
+        with runtime_lock:
+            runtime.is_busy = False
+            set_runtime_phase_locked("failed")
+            runtime.status = f"Viser preview start failed: {exc}"
+            runtime.last_error = str(exc)
+        yield _scene_engine_updates(output_root, preview_html)
+        return
+
+    with runtime_lock:
+        runtime.log_lines.append("$ " + " ".join(preview_command))
+        set_runtime_phase_locked("preview")
+        runtime.status = "Starting Viser preview..."
+    yield _scene_engine_updates(output_root, preview_html)
+
+    if not _wait_for_viser(port, preview_process):
+        terminate_process_group(preview_process)
+        with runtime_lock:
+            runtime.is_busy = False
+            set_runtime_phase_locked("failed")
+            runtime.status = "Viser preview did not start."
+            runtime.last_error = runtime.status
+        yield _scene_engine_updates(output_root, preview_html)
+        return
+
+    preview_html = _viser_iframe(port, scene_hash)
+    with runtime_lock:
+        runtime.scene_preview_process = preview_process
+        runtime.is_busy = False
+        set_runtime_phase_locked("complete")
+        runtime.status = "Scene generated successfully. Viser preview is ready."
+        runtime.last_error = None
+    yield _scene_engine_updates(output_root, preview_html)
 
 
 def run_action_engine_from_current(task_text: str, robot_profile: str | None):

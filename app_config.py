@@ -21,9 +21,9 @@ DIRECT_NO_PROXY_VALUE = "*"
 # values here for a local deployment, or provide the matching SIMREADY_* env
 # vars before launch.  Keep the API key out of commits; an empty value leaves
 # any inherited OPENAI_* variables and SimReady's own JSON configuration intact.
-SIMREADY_OPENAI_API_KEY = os.environ.get("SIMREADY_OPENAI_API_KEY", "")
-SIMREADY_OPENAI_MODEL = os.environ.get("SIMREADY_OPENAI_MODEL", "")
-SIMREADY_OPENAI_BASE_URL = os.environ.get("SIMREADY_OPENAI_BASE_URL", "")
+SIMREADY_OPENAI_API_KEY = os.environ.get("SIMREADY_OPENAI_API_KEY", "tp-cigd9h4eh33v79adk5wz77y9o9rngsvcrw527wxiic5jdeqq")
+SIMREADY_OPENAI_MODEL = os.environ.get("SIMREADY_OPENAI_MODEL", "mimo-v2.5")
+SIMREADY_OPENAI_BASE_URL = os.environ.get("SIMREADY_OPENAI_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
 
 
 def configure_direct_network_env(env: Any = None) -> None:
@@ -60,6 +60,11 @@ DEXFORCE_LOGO = ASSETS_DIR / "dexforce.png"
 INTERACT_RANDOM_PREVIEW_DIR = APP_ROOT / ".gradio_previews"
 DEBUG_ENGINE_ROOT = APP_ROOT / ".debug_engine"
 DEBUG_ASSET_ENGINE_ROOT = DEBUG_ENGINE_ROOT / "assets"
+DEBUG_SCENE_ENGINE_ROOT = DEBUG_ENGINE_ROOT / "scenes"
+SCENE_ENGINE_CONFIG = (
+    EMBODICHAIN_ROOT / "embodichain" / "gen_sim" / "scene_engine_config.json"
+)
+SCENE_ENGINE_VISER_PORT = int(os.environ.get("SCENE_ENGINE_VISER_PORT", "8080"))
 SCENE_ID = "current"
 
 GYM_PROJECT_ROOT = EMBODICHAIN_ROOT / "gym_project"
@@ -140,6 +145,13 @@ COMMANDS = {
     "pipeline": {"module": "embodichain.gen_sim.action_agent_pipeline.cli.run_agent_pipeline", "base_args": ("--use-prompt2scene", "--overwrite-config", "--regenerate", "--skip-run-agent")},
     "config": {"module": "embodichain.gen_sim.action_agent_pipeline.cli.generate_action_agent_config", "base_args": ("--overwrite",)},
     "agent": {"module": "embodichain.gen_sim.action_agent_pipeline.cli.run_agent", "help_args": ("--help",), "base_args": ("--regenerate", "--renderer", "fast-rt"), "parallel_args": ("--arena_space", "2.2", "--filter_dataset_saving"), "parallel_num_envs": "9", "single_num_envs": "1"},
+    # Scene Engine is dispatched by EmbodiChain's registered top-level CLI.
+    # The scene_engine package itself has no __main__.py in this checkout.
+    "scene_engine": {
+        "module": "embodichain",
+        "base_args": ("scene-engine",),
+        "preview_script": "embodichain/gen_sim/scene_engine/cli/preview.py",
+    },
 }
 
 PHASE_DEFINITIONS = {

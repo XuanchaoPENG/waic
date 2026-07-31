@@ -13,3 +13,5 @@ __pycache__/
 scenes/
 
 .gradio_previews/
+
+.debug_engine/
