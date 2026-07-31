@@ -27,11 +27,11 @@ DIRECT_NO_PROXY_VALUE = "*"
 # vars before launch.  Keep the API key out of commits; an empty value leaves
 # any inherited OPENAI_* variables and SimReady's own JSON configuration intact.
 SIMREADY_OPENAI_API_KEY = os.environ.get(
-    "SIMREADY_OPENAI_API_KEY", "tp-cigd9h4eh33v79adk5wz77y9o9rngsvcrw527wxiic5jdeqq"
+    "SIMREADY_OPENAI_API_KEY", ""
 )
-SIMREADY_OPENAI_MODEL = os.environ.get("SIMREADY_OPENAI_MODEL", "mimo-v2.5")
+SIMREADY_OPENAI_MODEL = os.environ.get("SIMREADY_OPENAI_MODEL", "")
 SIMREADY_OPENAI_BASE_URL = os.environ.get(
-    "SIMREADY_OPENAI_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1"
+    "SIMREADY_OPENAI_BASE_URL", ""
 )
 
 
