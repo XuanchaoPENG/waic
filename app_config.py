@@ -86,6 +86,9 @@ SCENE_ENGINE_CONFIG = (
     EMBODICHAIN_ROOT / "embodichain" / "gen_sim" / "scene_engine_config.json"
 )
 SCENE_ENGINE_VISER_PORT = int(os.environ.get("SCENE_ENGINE_VISER_PORT", "8080"))
+# Articulation previews run as a separate Viser process from scene previews,
+# so they need their own externally configurable port.
+ARTICRAFT_VISER_PORT = int(os.environ.get("ARTICRAFT_VISER_PORT", "8081"))
 SCENE_ID = "current"
 
 GYM_PROJECT_ROOT = EMBODICHAIN_ROOT / "gym_project"

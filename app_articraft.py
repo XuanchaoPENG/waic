@@ -11,7 +11,10 @@ import os
 import queue
 import json
 import shutil
+import html
+import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -26,8 +29,13 @@ from app_config import (
     ARTICRAFT_OUTPUT_ROOT,
     ARTICRAFT_REPOSITORY_URL,
     ARTICRAFT_ROOT,
+    ARTICRAFT_VISER_PORT,
 )
-from app_processes import read_process_output
+from app_processes import read_process_output, start_pipeline, terminate_process_group
+
+
+_articraft_preview_lock = threading.Lock()
+_articraft_preview_process: subprocess.Popen[str] | None = None
 
 
 def _command_path(name: str) -> str | None:
@@ -243,6 +251,74 @@ def _make_result_bundle(record_id: str) -> tuple[Path, Path]:
     return materialized, archive
 
 
+def _wait_for_articraft_viser(process: subprocess.Popen[str]) -> bool:
+    """Wait for the Articulation Viser service to accept browser connections."""
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return False
+        try:
+            with socket.create_connection(("127.0.0.1", ARTICRAFT_VISER_PORT), timeout=0.2):
+                return True
+        except OSError:
+            time.sleep(0.25)
+    return False
+
+
+def _articraft_viser_iframe(record_id: str) -> str:
+    """Embed the Articulation Viser service through the Gradio page hostname."""
+    srcdoc = (
+        "<script>window.location.replace(window.top.location.protocol + '//' + "
+        f"window.top.location.hostname + ':{ARTICRAFT_VISER_PORT}');</script>"
+    )
+    escaped_record_id = html.escape(record_id)
+    return (
+        "<div style='margin-top:0.5rem'><strong>Viser articulation preview: "
+        f"{escaped_record_id}</strong>"
+        f"<iframe title='Viser articulation preview {escaped_record_id}' "
+        f"srcdoc=\"{html.escape(srcdoc, quote=True)}\" "
+        "style='width:100%; height:680px; border:1px solid #d1d5db; border-radius:8px; margin-top:0.5rem;'></iframe>"
+        "</div>"
+    )
+
+
+def _start_articraft_viser_preview(materialized: Path, record_id: str) -> str:
+    """Load the compiled URDF as an articulation and expose it through Viser."""
+    global _articraft_preview_process
+
+    urdf_path = materialized / "model.urdf"
+    if not urdf_path.is_file():
+        raise FileNotFoundError(f"Compiled URDF is missing: {urdf_path}")
+
+    with _articraft_preview_lock:
+        if _articraft_preview_process is not None:
+            terminate_process_group(_articraft_preview_process)
+            _articraft_preview_process = None
+
+        command = [
+            sys.executable,
+            "-m",
+            "embodichain.lab.scripts.preview_asset",
+            "--asset_path",
+            str(urdf_path),
+            "--asset_type",
+            "articulation",
+            "--headless",
+            "--viser",
+            "--viser-host",
+            "0.0.0.0",
+            "--viser-port",
+            str(ARTICRAFT_VISER_PORT),
+        ]
+        process = start_pipeline(command)
+        if not _wait_for_articraft_viser(process):
+            terminate_process_group(process)
+            raise RuntimeError("Viser preview did not start.")
+        _articraft_preview_process = process
+
+    return _articraft_viser_iframe(record_id)
+
+
 def _external_check_is_unsupported(result: subprocess.CompletedProcess[str]) -> bool:
     """Recognize the older Articraft CLI, which has no ``external check``."""
     output = (result.stdout or "").lower()
@@ -330,7 +406,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
     """Initialize a record, let Codex author it, and expose one result bundle."""
     prompt = (prompt_value or "").strip()
     if not prompt:
-        yield None, "", "**Input error:** enter a description of the articulated object.", ""
+        yield None, "", "**Input error:** enter a description of the articulated object.", "", ""
         return
 
     details, errors, codex = _check_requirements()
@@ -338,7 +414,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
         message = (
             "\n".join(f"- {error}" for error in errors) or "Codex CLI is unavailable."
         )
-        yield None, "", f"**Articulation is not ready.**\n\n{message}", ""
+        yield None, "", f"**Articulation is not ready.**\n\n{message}", "", ""
         return
 
     record_id = _record_id()
@@ -365,11 +441,11 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
         if initialized.returncode:
             yield None, "", "**Articraft record initialization failed.**", "\n".join(
                 log_lines
-            )
+            ), ""
             return
         model_path = _active_model_path(record_dir)
     except Exception as exc:
-        yield None, "", f"**Setup failed:** {exc}", "\n".join(log_lines)
+        yield None, "", f"**Setup failed:** {exc}", "\n".join(log_lines), ""
         return
 
     final_message = run_root / "codex_final_message.txt"
@@ -401,7 +477,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
     log_lines.append("$ codex exec --sandbox workspace-write …")
     yield None, record_dir.as_posix(), "**Codex is generating and validating the Articraft model…**", "\n".join(
         log_lines
-    )
+    ), ""
 
     try:
         process = subprocess.Popen(
@@ -417,7 +493,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
     except Exception as exc:
         yield None, record_dir.as_posix(), f"**Codex could not start:** {exc}", "\n".join(
             log_lines
-        )
+        ), ""
         return
 
     output_queue: queue.Queue[str] = queue.Queue()
@@ -433,7 +509,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
             pass
         yield None, record_dir.as_posix(), "**Codex is generating and validating the Articraft model…**", "\n".join(
             log_lines[-240:]
-        )
+        ), ""
         time.sleep(0.75)
     reader.join(timeout=2)
     try:
@@ -449,7 +525,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
     if process.returncode:
         yield None, record_dir.as_posix(), f"**Codex generation failed** (exit code {process.returncode}).", "\n".join(
             log_lines[-300:]
-        )
+        ), ""
         return
 
     # Do not rely solely on Codex's final message: independently run the
@@ -467,6 +543,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
         record_dir.as_posix(),
         "**Codex finished. Articraft is running the final validation gate…**",
         "\n".join(log_lines[-300:]),
+        "",
     )
     try:
         checked = _run_check(check_command, timeout=300)
@@ -477,6 +554,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
             record_dir.as_posix(),
             f"**Final Articraft validation could not run:** {exc}",
             "\n".join(log_lines[-300:]),
+            "",
         )
         return
     if checked.returncode:
@@ -486,6 +564,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
                 record_dir.as_posix(),
                 "**Articraft validation failed; no output bundle was published.**",
                 "\n".join(log_lines[-300:]),
+                "",
             )
             return
         # The older CLI reports external init/finalize/categories only. Its
@@ -497,6 +576,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
             "--target",
             "full",
             "--validate",
+            "--strict-geom-qc",
             record_id,
         )
         log_lines.append("external check is unavailable; falling back to compile --validate.")
@@ -506,6 +586,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
             record_dir.as_posix(),
             "**Using this Articraft version's compile validation gate…**",
             "\n".join(log_lines[-300:]),
+            "",
         )
         try:
             compiled = _run_check(compile_command, timeout=300)
@@ -516,6 +597,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
                 record_dir.as_posix(),
                 f"**Fallback Articraft validation could not run:** {exc}",
                 "\n".join(log_lines[-300:]),
+                "",
             )
             return
         if compiled.returncode:
@@ -524,6 +606,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
                 record_dir.as_posix(),
                 "**Articraft validation failed; no output bundle was published.**",
                 "\n".join(log_lines[-300:]),
+                "",
             )
             return
         failures = _compile_report_failures(record_id)
@@ -534,6 +617,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
                 record_dir.as_posix(),
                 "**Articraft validation found blocking model defects; no output bundle was published.**",
                 "\n".join(log_lines[-300:]),
+                "",
             )
             return
 
@@ -554,6 +638,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
             record_dir.as_posix(),
             f"**Articraft finalization could not run:** {exc}",
             "\n".join(log_lines[-300:]),
+            "",
         )
         return
     if finalized.returncode:
@@ -562,6 +647,7 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
             record_dir.as_posix(),
             "**Articraft finalization failed; no output bundle was published.**",
             "\n".join(log_lines[-300:]),
+            "",
         )
         return
 
@@ -571,13 +657,20 @@ def generate_articraft_asset(prompt_value: str, image_value: Any):
             "**Articraft generation completed and passed the Codex validation workflow.**\n\n"
             f"- Record: `{record_dir}`\n- Compiled output: `{materialized}`\n- Downloadable bundle: `{archive}`"
         )
+        try:
+            preview_html = _start_articraft_viser_preview(materialized, record_id)
+            status += "\n- Interactive Viser preview: ready"
+        except Exception as exc:
+            preview_html = ""
+            status += f"\n- Interactive Viser preview could not start: `{exc}`"
+            log_lines.append(f"Viser preview failed: {exc}")
         yield archive.as_posix(), record_dir.as_posix(), status, "\n".join(
             log_lines[-300:]
-        )
+        ), preview_html
     except Exception as exc:
         yield None, record_dir.as_posix(), f"**Codex finished, but result packaging failed:** {exc}", "\n".join(
             log_lines[-300:]
-        )
+        ), ""
 
 
 def build_articraft_panel() -> None:
@@ -607,6 +700,11 @@ def build_articraft_panel() -> None:
             label="Compiled Articulation result bundle (.zip)", interactive=False
         )
         record_folder = gr.Textbox(label="Articulation record folder", interactive=False)
+    articulation_preview = gr.HTML(
+        "<div style='padding: 1rem; color: #6b7280;'>"
+        "The interactive Viser articulation preview will appear here after generation."
+        "</div>"
+    )
     generation_status = gr.Markdown("**Status:** waiting for a description.")
     generation_log = gr.Textbox(
         label="Codex / Articraft log", lines=14, interactive=False
@@ -618,5 +716,11 @@ def build_articraft_panel() -> None:
     generate_button.click(
         generate_articraft_asset,
         inputs=[prompt, image],
-        outputs=[output_file, record_folder, generation_status, generation_log],
+        outputs=[
+            output_file,
+            record_folder,
+            generation_status,
+            generation_log,
+            articulation_preview,
+        ],
     )
